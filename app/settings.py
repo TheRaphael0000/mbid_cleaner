@@ -183,8 +183,8 @@ class AppSettings:
         kinds: list[str] = []
         if self.resolve_tracks:
             kinds.append("track")
-        if self.resolve_artists:
-            kinds.append("artist")
         if self.resolve_albums:
             kinds.append("album")
+        if self.resolve_artists:
+            kinds.append("artist")
         return kinds

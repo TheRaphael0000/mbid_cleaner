@@ -1,7 +1,7 @@
 # MBID Cleaner
 
 A small PySide6 desktop app that imports a Last.fm `recenttracks` JSON export into
-SQLite, fills missing track / artist / album MBIDs from **MusicBrainz** and/or a
+SQLite, fills missing track / album / artist MBIDs from **MusicBrainz** and/or a
 local **Navidrome** library, lets you review or manually edit them, and exports
 the same JSON schema with the MBIDs completed.
 
@@ -32,7 +32,7 @@ python main.py
 
    Also set a contact email (MusicBrainz requires clients to identify themselves),
    the request interval (min. 1.05 s by default), which kinds to resolve
-   (**Tracks / Artists / Albums**), and whether album lookups use `release`
+   (**Tracks / Albums / Artists**), and whether album lookups use `release`
    (default, matches Last.fm) or `release-group`. Navidrome matching uses relaxed,
    Navidrome-only cleanup (e.g. strips `(Remaster)`/deluxe/version tags and
    `feat./ft.` credits) for search and comparison; MusicBrainz matching remains

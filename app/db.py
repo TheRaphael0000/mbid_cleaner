@@ -577,7 +577,10 @@ class Database:
         if kind in ("track", "artist", "album"):
             query += " AND kind = ?"
             params.append(kind)
-        query += " ORDER BY (status = 'discarded'), affected_count DESC, label_artist, label_title"
+        query += (
+            " ORDER BY CASE kind WHEN 'track' THEN 0 WHEN 'album' THEN 1 ELSE 2 END,"
+            " (status = 'discarded'), affected_count DESC, label_artist, label_title"
+        )
         with self.connect() as con:
             return con.execute(query, params).fetchall()
 

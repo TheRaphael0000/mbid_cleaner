@@ -53,11 +53,13 @@ from .sources import (
 from .util import is_uuid
 from .workers import ExportWorker, ImportWorker, ResolveWorker, SearchWorker
 
-_LABELS = {"track": "Track MBID", "artist": "Artist MBID", "album": "Album MBID"}
+# Consistent display order everywhere: track → album → artist.
+_KIND_ORDER = ("track", "album", "artist")
+_LABELS = {"track": "Track MBID", "album": "Album MBID", "artist": "Artist MBID"}
 _KEYS = {
     "track": "track_lookup_key",
-    "artist": "artist_key",
     "album": "album_lookup_key",
+    "artist": "artist_key",
 }
 
 
@@ -129,7 +131,7 @@ class ManualSearchDialog(QDialog):
         self._worker: SearchWorker | None = None
         self._candidates: list[dict] = []
 
-        labels = {"track": "recording", "artist": "artist", "album": settings.album_entity}
+        labels = {"track": "recording", "album": settings.album_entity, "artist": "artist"}
         self.setWindowTitle(f"Search MusicBrainz ({kind}: {labels.get(kind, kind)})")
         self.resize(820, 560)
 
@@ -275,9 +277,8 @@ class UnresolvedCandidatesDialog(QDialog):
 
         self.kind_filter = QComboBox()
         self.kind_filter.addItem("All kinds", None)
-        self.kind_filter.addItem("Track", "track")
-        self.kind_filter.addItem("Artist", "artist")
-        self.kind_filter.addItem("Album", "album")
+        for kind in _KIND_ORDER:
+            self.kind_filter.addItem(kind.capitalize(), kind)
         self.kind_filter.currentIndexChanged.connect(self.reload)
 
         self.hide_zero = QCheckBox("Hide entries with no usable candidates")
@@ -734,15 +735,15 @@ class ExportOptionsDialog(QDialog):
         note.setWordWrap(True)
 
         self.require_track = QCheckBox(_LABELS["track"])
-        self.require_artist = QCheckBox(_LABELS["artist"])
         self.require_album = QCheckBox(_LABELS["album"])
-        boxes = (self.require_track, self.require_artist, self.require_album)
+        self.require_artist = QCheckBox(_LABELS["artist"])
+        boxes = (self.require_track, self.require_album, self.require_artist)
         for box, checked in zip(
             boxes,
             (
                 settings.export_require_track,
-                settings.export_require_artist,
                 settings.export_require_album,
+                settings.export_require_artist,
             ),
         ):
             box.setChecked(checked)
@@ -817,18 +818,18 @@ class SettingsDialog(QDialog):
 
         self.resolve_tracks = QCheckBox("Tracks")
         self.resolve_tracks.setChecked(settings.resolve_tracks)
-        self.resolve_artists = QCheckBox("Artists")
-        self.resolve_artists.setChecked(settings.resolve_artists)
         self.resolve_albums = QCheckBox("Albums")
         self.resolve_albums.setChecked(settings.resolve_albums)
+        self.resolve_artists = QCheckBox("Artists")
+        self.resolve_artists.setChecked(settings.resolve_artists)
         self.hierarchical = QCheckBox(
             "Fill related MBIDs from exact matches (track / album / artist)"
         )
         self.hierarchical.setChecked(settings.hierarchical)
         kinds_row = QHBoxLayout()
         kinds_row.addWidget(self.resolve_tracks)
-        kinds_row.addWidget(self.resolve_artists)
         kinds_row.addWidget(self.resolve_albums)
+        kinds_row.addWidget(self.resolve_artists)
         kinds_row.addStretch(1)
 
         form = QFormLayout()
@@ -1024,8 +1025,8 @@ class MainWindow(QMainWindow):
         self.lbl_total.setText(f"<b>{stats['total']:,}</b> scrobbles")
         self.lbl_missing.setText(
             f"Missing — track <b>{stats['miss_track']:,}</b> · "
-            f"artist <b>{stats['miss_artist']:,}</b> · "
-            f"album <b>{stats['miss_album']:,}</b>"
+            f"album <b>{stats['miss_album']:,}</b> · "
+            f"artist <b>{stats['miss_artist']:,}</b>"
         )
         kinds_label = ", ".join(kinds) if kinds else "none"
         discarded = (
@@ -1114,7 +1115,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "No kinds selected",
-                "Enable at least one of Tracks, Artists, or Albums in Settings.",
+                "Enable at least one of Tracks, Albums, or Artists in Settings.",
             )
             return
         client = (
