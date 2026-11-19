@@ -74,6 +74,17 @@ def _duration(seconds: float) -> str:
     return f"~{secs}s"
 
 
+def _navidrome_client(settings: AppSettings) -> NavidromeClient:
+    """Build a Navidrome client for a manual search, with a clear config error."""
+    if not settings.navidrome_url.strip():
+        raise ValueError("Set the Navidrome URL in Settings first.")
+    return NavidromeClient(
+        url=settings.navidrome_url,
+        username=settings.navidrome_user,
+        password=settings.navidrome_password,
+    )
+
+
 class CandidateDialog(QDialog):
     """Pick an MBID from the candidates saved during a previous search."""
 
@@ -115,7 +126,7 @@ class CandidateDialog(QDialog):
 
 
 class ManualSearchDialog(QDialog):
-    """Manually query MusicBrainz and pick a match for a specific field."""
+    """Manually query MusicBrainz or Navidrome and pick a match for a field."""
 
     def __init__(
         self,
@@ -130,18 +141,23 @@ class ManualSearchDialog(QDialog):
         self.kind = kind
         self._worker: SearchWorker | None = None
         self._candidates: list[dict] = []
+        self._search_source = "MusicBrainz"
 
         labels = {"track": "recording", "album": settings.album_entity, "artist": "artist"}
-        self.setWindowTitle(f"Search MusicBrainz ({kind}: {labels.get(kind, kind)})")
+        self.setWindowTitle(f"Manual search ({kind}: {labels.get(kind, kind)})")
         self.resize(820, 560)
 
         self.artist_edit = QLineEdit(artist)
         self.artist_edit.setPlaceholderText("Artist name")
         self.title_edit = QLineEdit(title)
         self.title_edit.setPlaceholderText("Title / name")
-        self.search_button = QPushButton("Search")
-        self.search_button.clicked.connect(self.on_search)
-        self.status = QLabel("Edit the fields and click Search.")
+        self.search_button = QPushButton("Search MusicBrainz")
+        self.search_button.clicked.connect(lambda _=False: self.on_search("musicbrainz"))
+        self.search_navidrome_button = QPushButton("Search Navidrome")
+        self.search_navidrome_button.clicked.connect(
+            lambda _=False: self.on_search("navidrome")
+        )
+        self.status = QLabel("Edit the fields and click a search button.")
         self.status.setStyleSheet("color: gray;")
 
         form = QFormLayout()
@@ -168,20 +184,24 @@ class ManualSearchDialog(QDialog):
             lambda: self.apply_button.setEnabled(self.list.currentItem() is not None)
         )
 
-        hint = QLabel("Results come from a live MusicBrainz query. Double-click to open on musicbrainz.org.")
+        hint = QLabel(
+            "Results come from a live MusicBrainz or Navidrome query. "
+            "Double-click to open a result on musicbrainz.org when available."
+        )
         hint.setStyleSheet("color: gray;")
 
         layout = QVBoxLayout(self)
         layout.addLayout(form)
         search_row = QHBoxLayout()
         search_row.addWidget(self.search_button)
+        search_row.addWidget(self.search_navidrome_button)
         search_row.addWidget(self.status, 1)
         layout.addLayout(search_row)
         layout.addWidget(self.list, 1)
         layout.addWidget(hint)
         layout.addWidget(self.buttons)
 
-    def on_search(self) -> None:
+    def on_search(self, source: str = "musicbrainz") -> None:
         artist = self.artist_edit.text().strip()
         title = self.title_edit.text().strip() if self.kind != "artist" else ""
         if self.kind == "artist" and not artist:
@@ -193,23 +213,38 @@ class ManualSearchDialog(QDialog):
         if self._worker and self._worker.isRunning():
             return
 
-        client = MBClient(
-            contact=self.settings.contact,
-            rate_limit=self.settings.rate_limit,
-            album_entity=self.settings.album_entity,
-        )
+        if source == "navidrome":
+            try:
+                client = _navidrome_client(self.settings)
+            except ValueError as exc:
+                self.status.setText(str(exc))
+                return
+            self._search_source = "Navidrome"
+        else:
+            client = MBClient(
+                contact=self.settings.contact,
+                rate_limit=self.settings.rate_limit,
+                album_entity=self.settings.album_entity,
+            )
+            self._search_source = "MusicBrainz"
         self._candidates = []
         self.list.clear()
         self.search_button.setEnabled(False)
+        self.search_navidrome_button.setEnabled(False)
         self.apply_button.setEnabled(False)
-        self.status.setText("Searching MusicBrainz (respecting rate limit)…")
+        suffix = " (respecting rate limit)" if source == "musicbrainz" else ""
+        self.status.setText(f"Searching {self._search_source}{suffix}…")
 
         worker = SearchWorker(client, self.kind, artist, title, self)
         self._worker = worker
         worker.succeeded.connect(self._on_results)
         worker.failed.connect(self._on_failed)
-        worker.finished.connect(lambda: self.search_button.setEnabled(True))
+        worker.finished.connect(self._on_search_finished)
         worker.start()
+
+    def _on_search_finished(self) -> None:
+        self.search_button.setEnabled(True)
+        self.search_navidrome_button.setEnabled(True)
 
     def _on_results(self, candidates: list[dict]) -> None:
         self._candidates = candidates
@@ -223,9 +258,11 @@ class ManualSearchDialog(QDialog):
             self.list.addItem(item)
         if candidates:
             self.list.setCurrentRow(0)
-            self.status.setText(f"Found {len(candidates)} candidate(s).")
+            self.status.setText(
+                f"{self._search_source}: Found {len(candidates)} candidate(s)."
+            )
         else:
-            self.status.setText("No results found.")
+            self.status.setText(f"{self._search_source}: No results found.")
 
     def _on_failed(self, traceback_text: str) -> None:
         self.status.setText("Search failed (see details).")
@@ -350,10 +387,16 @@ class UnresolvedCandidatesDialog(QDialog):
 
         search_row = QHBoxLayout()
         self.search_button = QPushButton("Search MusicBrainz")
-        self.search_button.clicked.connect(self.on_manual_search)
-        self.search_status = QLabel("Edit fields and search.")
+        self.search_button.clicked.connect(lambda _=False: self.on_manual_search("musicbrainz"))
+        self.search_navidrome_button = QPushButton("Search Navidrome")
+        self.search_navidrome_button.clicked.connect(
+            lambda _=False: self.on_manual_search("navidrome")
+        )
+        self._search_source = "MusicBrainz"
+        self.search_status = QLabel("Edit fields and choose a source to search.")
         self.search_status.setStyleSheet("color: gray;")
         search_row.addWidget(self.search_button)
+        search_row.addWidget(self.search_navidrome_button)
         search_row.addWidget(self.search_status, 1)
         manual_layout.addLayout(search_row)
 
@@ -580,10 +623,11 @@ class UnresolvedCandidatesDialog(QDialog):
             self.search_title_label.setText(
                 "Track title:" if kind == "track" else "Album title:"
             )
-        self.search_status.setText("Edit fields and search MusicBrainz.")
+        self.search_status.setText("Edit fields and choose a source to search.")
         self.search_button.setEnabled(True)
+        self.search_navidrome_button.setEnabled(True)
 
-    def on_manual_search(self) -> None:
+    def on_manual_search(self, source: str = "musicbrainz") -> None:
         if self._current_row is None:
             return
         if self._worker and self._worker.isRunning():
@@ -598,30 +642,47 @@ class UnresolvedCandidatesDialog(QDialog):
             self.search_status.setText("Enter both artist and title.")
             return
 
-        client = MBClient(
-            contact=self.settings.contact,
-            rate_limit=self.settings.rate_limit,
-            album_entity=self.settings.album_entity,
-        )
+        if source == "navidrome":
+            try:
+                client = _navidrome_client(self.settings)
+            except ValueError as exc:
+                self.search_status.setText(str(exc))
+                return
+            self._search_source = "Navidrome"
+        else:
+            client = MBClient(
+                contact=self.settings.contact,
+                rate_limit=self.settings.rate_limit,
+                album_entity=self.settings.album_entity,
+            )
+            self._search_source = "MusicBrainz"
         self._search_candidates = []
         self._clear_layout(self.search_list_layout)
         self.search_button.setEnabled(False)
-        self.search_status.setText("Searching MusicBrainz (respecting rate limit)…")
+        self.search_navidrome_button.setEnabled(False)
+        suffix = " (respecting rate limit)" if source == "musicbrainz" else ""
+        self.search_status.setText(f"Searching {self._search_source}{suffix}…")
 
         worker = SearchWorker(client, kind, artist, title, self)
         self._worker = worker
         worker.succeeded.connect(self._on_search_results)
         worker.failed.connect(self._on_search_failed)
-        worker.finished.connect(lambda: self.search_button.setEnabled(True))
+        worker.finished.connect(self._on_search_finished)
         worker.start()
+
+    def _on_search_finished(self) -> None:
+        self.search_button.setEnabled(True)
+        self.search_navidrome_button.setEnabled(True)
 
     def _on_search_results(self, candidates: list[dict]) -> None:
         self._search_candidates = candidates
         self._clear_layout(self.search_list_layout)
         if not candidates:
-            self.search_status.setText("No results found.")
+            self.search_status.setText(f"{self._search_source}: No results found.")
             return
-        self.search_status.setText(f"Found {len(candidates)} candidate(s).")
+        self.search_status.setText(
+            f"{self._search_source}: Found {len(candidates)} candidate(s)."
+        )
         for candidate in candidates:
             self.search_list_layout.addWidget(
                 self._candidate_row(candidate, candidates, source="search")
@@ -651,6 +712,7 @@ class UnresolvedCandidatesDialog(QDialog):
         layout.addWidget(label, 1)
 
         open_btn = QPushButton("Open")
+        open_btn.setEnabled(bool(candidate.get("url")))
         open_btn.setToolTip("Open on musicbrainz.org")
         open_btn.clicked.connect(lambda _=False, c=candidate: self._open_candidate(c))
         layout.addWidget(open_btn)

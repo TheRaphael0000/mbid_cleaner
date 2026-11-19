@@ -133,12 +133,19 @@ class ExportWorker(QThread):
 
 
 class SearchWorker(QThread):
-    """Run a single MusicBrainz search without blocking the UI."""
+    """Run one manual search (MusicBrainz or Navidrome) without blocking the UI."""
 
     succeeded = Signal(list)
     failed = Signal(str)
 
-    def __init__(self, client: MBClient, kind: str, artist: str, title: str, parent=None) -> None:
+    def __init__(
+        self,
+        client: MBClient | NavidromeClient,
+        kind: str,
+        artist: str,
+        title: str,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self.client = client
         self.kind = kind
