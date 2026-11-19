@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
+    QFrame,
     QHBoxLayout,
     QHeaderView,
     QInputDialog,
@@ -30,6 +31,8 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QScrollArea,
+    QStackedWidget,
     QTableView,
     QToolBar,
     QVBoxLayout,
@@ -245,18 +248,23 @@ class ManualSearchDialog(QDialog):
 
 
 
-class UnresolvedCandidatesDialog(QDialog):
-    """Browse lookups that had no exact match and apply a saved candidate."""
 
-    def __init__(self, db: Database, parent=None) -> None:
+class UnresolvedCandidatesDialog(QDialog):
+    """Browse unresolved lookups: apply saved candidates or manually query MB."""
+
+    def __init__(self, db: Database, settings: AppSettings, parent=None) -> None:
         super().__init__(parent)
         self.db = db
-        self._lookups: list = []
-        self._candidates: list[dict] = []
+        self.settings = settings
+        self._all_lookups: list = []
+        self._current_row = None
+        self._current_saved: list[dict] = []
+        self._search_candidates: list[dict] = []
+        self._worker: SearchWorker | None = None
         self.applied_count = 0
 
         self.setWindowTitle("Review unresolved candidates")
-        self.resize(1100, 700)
+        self.resize(1200, 760)
 
         self.kind_filter = QComboBox()
         self.kind_filter.addItem("All kinds", None)
@@ -265,23 +273,16 @@ class UnresolvedCandidatesDialog(QDialog):
         self.kind_filter.addItem("Album", "album")
         self.kind_filter.currentIndexChanged.connect(self.reload)
 
+        self.hide_zero = QCheckBox("Hide 0-candidate entries")
+        self.hide_zero.setChecked(True)
+        self.hide_zero.stateChanged.connect(self.reload)
+
         self.status = QLabel("")
         self.status.setStyleSheet("color: gray;")
 
         self.lookup_list = QListWidget()
         self.lookup_list.currentRowChanged.connect(self._on_lookup_selected)
 
-        self.candidate_list = QListWidget()
-        self.candidate_list.itemDoubleClicked.connect(self._open_link)
-        self.candidate_list.itemSelectionChanged.connect(
-            lambda: self.apply_button.setEnabled(
-                self.candidate_list.currentItem() is not None
-            )
-        )
-
-        self.apply_button = QPushButton("Apply selected candidate")
-        self.apply_button.setEnabled(False)
-        self.apply_button.clicked.connect(self.apply_selected)
         self.refresh_button = QPushButton("Refresh")
         self.refresh_button.clicked.connect(self.reload)
         self.close_button = QPushButton("Close")
@@ -290,6 +291,7 @@ class UnresolvedCandidatesDialog(QDialog):
         header = QHBoxLayout()
         header.addWidget(QLabel("Kind:"))
         header.addWidget(self.kind_filter)
+        header.addWidget(self.hide_zero)
         header.addStretch(1)
         header.addWidget(self.refresh_button)
 
@@ -297,13 +299,62 @@ class UnresolvedCandidatesDialog(QDialog):
         left.addWidget(QLabel("Unresolved lookups (queried, no exact match):"))
         left.addWidget(self.lookup_list, 1)
 
+        # Right side: saved candidates page + manual search page
+        self.right_title = QLabel("Select a lookup")
+        self.right_title.setStyleSheet("font-weight: bold;")
+
+        # --- Saved candidates page ---
+        self.saved_page = QWidget()
+        saved_layout = QVBoxLayout(self.saved_page)
+        saved_layout.setContentsMargins(0, 0, 0, 0)
+        self.saved_area = QScrollArea()
+        self.saved_area.setWidgetResizable(True)
+        self.saved_container = QWidget()
+        self.saved_list_layout = QVBoxLayout(self.saved_container)
+        self.saved_list_layout.setContentsMargins(0, 0, 0, 0)
+        self.saved_list_layout.setAlignment(Qt.AlignTop)
+        self.saved_area.setWidget(self.saved_container)
+        saved_layout.addWidget(self.saved_area, 1)
+
+        # --- Manual search page (for 0-candidate lookups) ---
+        self.manual_page = QWidget()
+        manual_layout = QVBoxLayout(self.manual_page)
+        manual_layout.setContentsMargins(0, 0, 0, 0)
+        form = QFormLayout()
+        self.search_artist = QLineEdit()
+        self.search_artist.setPlaceholderText("Artist")
+        self.search_title = QLineEdit()
+        self.search_title.setPlaceholderText("Title / name")
+        self.search_title_label = QLabel("Title:")
+        form.addRow("Artist:", self.search_artist)
+        form.addRow(self.search_title_label, self.search_title)
+        manual_layout.addLayout(form)
+
+        search_row = QHBoxLayout()
+        self.search_button = QPushButton("Search MusicBrainz")
+        self.search_button.clicked.connect(self.on_manual_search)
+        self.search_status = QLabel("Edit fields and search.")
+        self.search_status.setStyleSheet("color: gray;")
+        search_row.addWidget(self.search_button)
+        search_row.addWidget(self.search_status, 1)
+        manual_layout.addLayout(search_row)
+
+        self.search_area = QScrollArea()
+        self.search_area.setWidgetResizable(True)
+        self.search_container = QWidget()
+        self.search_list_layout = QVBoxLayout(self.search_container)
+        self.search_list_layout.setContentsMargins(0, 0, 0, 0)
+        self.search_list_layout.setAlignment(Qt.AlignTop)
+        self.search_area.setWidget(self.search_container)
+        manual_layout.addWidget(self.search_area, 1)
+
+        self.right_stack = QStackedWidget()
+        self.right_stack.addWidget(self.saved_page)   # 0
+        self.right_stack.addWidget(self.manual_page)  # 1
+
         right = QVBoxLayout()
-        right.addWidget(QLabel("Saved candidates for selected lookup:"))
-        right.addWidget(self.candidate_list, 1)
-        hint = QLabel("Double-click a candidate to open it on musicbrainz.org")
-        hint.setStyleSheet("color: gray;")
-        right.addWidget(hint)
-        right.addWidget(self.apply_button)
+        right.addWidget(self.right_title)
+        right.addWidget(self.right_stack, 1)
 
         lists = QHBoxLayout()
         lists.addLayout(left, 2)
@@ -320,73 +371,223 @@ class UnresolvedCandidatesDialog(QDialog):
 
         self.reload()
 
-    def reload(self) -> None:
-        kind = self.kind_filter.currentData()
-        self._lookups = self.db.unresolved_lookups(kind)
-        self.lookup_list.clear()
-        self.candidate_list.clear()
-        self._candidates = []
-        self.apply_button.setEnabled(False)
+    # ------------------------------------------------------------------ data/load
 
-        for row in self._lookups:
+    def reload(self) -> None:
+        current_key = None
+        if self._current_row is not None:
+            current_key = (self._current_row["kind"], self._current_row["key"])
+
+        kind = self.kind_filter.currentData()
+        self._all_lookups = self.db.unresolved_lookups(kind)
+        self.lookup_list.clear()
+
+        select_row = -1
+        for row in self._all_lookups:
             try:
                 candidates = json.loads(row["candidates_json"] or "[]")
             except Exception:
                 candidates = []
             count = len(candidates)
-            if row["kind"] == "artist":
-                label = row["label_artist"] or row["key"]
-            else:
-                artist = row["label_artist"] or ""
-                title = row["label_title"] or ""
-                label = f"{artist} — {title}".strip(" —") or row["key"]
+            if self.hide_zero.isChecked() and count == 0:
+                continue
+            label = self._lookup_label(row)
             item = QListWidgetItem(
                 f"[{row['kind']}] {label}\n"
                 f"affects {row['affected_count']:,} scrobble(s), {count} candidate(s)"
             )
             item.setData(Qt.UserRole, (row, candidates))
             self.lookup_list.addItem(item)
+            if current_key == (row["kind"], row["key"]):
+                select_row = self.lookup_list.count() - 1
 
-        if self._lookups:
-            self.status.setText(f"{len(self._lookups):,} unresolved lookup(s) loaded.")
-        else:
+        visible = self.lookup_list.count()
+        total = len(self._all_lookups)
+        if total == 0:
             self.status.setText("No unresolved lookups.")
+        elif visible == 0:
+            self.status.setText(
+                f"0 shown ({total:,} hidden by filter; uncheck 'Hide 0-candidate entries' to see them)."
+            )
+        else:
+            hidden = total - visible
+            extra = f", {hidden:,} hidden" if hidden else ""
+            self.status.setText(f"{visible:,} unresolved lookup(s) shown{extra}.")
+
+        if visible > 0:
+            self.lookup_list.setCurrentRow(select_row if select_row >= 0 else 0)
+        else:
+            self._show_none_selected()
+
+    @staticmethod
+    def _lookup_label(row) -> str:
+        if row["kind"] == "artist":
+            return row["label_artist"] or row["key"]
+        artist = row["label_artist"] or ""
+        title = row["label_title"] or ""
+        return f"{artist} — {title}".strip(" —") or row["key"]
+
+    def _show_none_selected(self) -> None:
+        self._current_row = None
+        self._current_saved = []
+        self._search_candidates = []
+        self.right_title.setText("Select a lookup")
+        self._clear_layout(self.saved_list_layout)
+        self._clear_layout(self.search_list_layout)
+        self.right_stack.setCurrentIndex(0)
 
     def _on_lookup_selected(self, index: int) -> None:
-        self.candidate_list.clear()
-        self._candidates = []
-        self.apply_button.setEnabled(False)
         if index < 0:
+            self._show_none_selected()
             return
         item = self.lookup_list.item(index)
         if item is None:
+            self._show_none_selected()
             return
-        _, candidates = item.data(Qt.UserRole)
-        self._candidates = candidates
-        for candidate in candidates:
-            citem = QListWidgetItem(
-                f"{candidate.get('name', '')} — {candidate.get('artist', '')} "
-                f"(score {candidate.get('score', '')})\n{candidate.get('mbid', '')}"
-            )
-            citem.setData(Qt.UserRole, candidate)
-            self.candidate_list.addItem(citem)
-        if candidates:
-            self.candidate_list.setCurrentRow(0)
+        row, candidates = item.data(Qt.UserRole)
+        self._current_row = row
+        self._current_saved = candidates
+        self._search_candidates = []
+        self._clear_layout(self.saved_list_layout)
+        self._clear_layout(self.search_list_layout)
 
-    def apply_selected(self) -> None:
-        lookup_item = self.lookup_list.currentItem()
-        cand_item = self.candidate_list.currentItem()
-        if lookup_item is None or cand_item is None:
+        label = self._lookup_label(row)
+        if candidates:
+            self.right_title.setText(
+                f"[{row['kind']}] {label} — {len(candidates)} saved candidate(s)"
+            )
+            self._populate_saved(candidates)
+            self.right_stack.setCurrentIndex(0)
+        else:
+            self.right_title.setText(
+                f"[{row['kind']}] {label} — no saved candidates (manual MusicBrainz search)"
+            )
+            self._prefill_manual(row)
+            self.right_stack.setCurrentIndex(1)
+
+    # --------------------------------------------------------------- saved page
+
+    def _populate_saved(self, candidates: list[dict]) -> None:
+        self._clear_layout(self.saved_list_layout)
+        if not candidates:
+            self.saved_list_layout.addWidget(QLabel("No saved candidates."))
             return
-        row, _ = lookup_item.data(Qt.UserRole)
-        candidate = cand_item.data(Qt.UserRole)
+        for candidate in candidates:
+            self.saved_list_layout.addWidget(
+                self._candidate_row(candidate, candidates, source="saved")
+            )
+
+    # -------------------------------------------------------------- manual page
+
+    def _prefill_manual(self, row) -> None:
+        kind = row["kind"]
+        self.search_artist.setText(row["label_artist"] or "")
+        if kind == "artist":
+            self.search_title.setText("")
+            self.search_title.setEnabled(False)
+            self.search_title_label.setText("Title: (not used)")
+        else:
+            self.search_title.setText(row["label_title"] or "")
+            self.search_title.setEnabled(True)
+            self.search_title_label.setText(
+                "Track title:" if kind == "track" else "Album title:"
+            )
+        self.search_status.setText("Edit fields and search MusicBrainz.")
+        self.search_button.setEnabled(True)
+
+    def on_manual_search(self) -> None:
+        if self._current_row is None:
+            return
+        if self._worker and self._worker.isRunning():
+            return
+        kind = self._current_row["kind"]
+        artist = self.search_artist.text().strip()
+        title = self.search_title.text().strip() if kind != "artist" else ""
+        if kind == "artist" and not artist:
+            self.search_status.setText("Enter an artist name.")
+            return
+        if kind != "artist" and (not artist or not title):
+            self.search_status.setText("Enter both artist and title.")
+            return
+
+        client = MBClient(
+            contact=self.settings.contact,
+            rate_limit=self.settings.rate_limit,
+            album_entity=self.settings.album_entity,
+        )
+        self._search_candidates = []
+        self._clear_layout(self.search_list_layout)
+        self.search_button.setEnabled(False)
+        self.search_status.setText("Searching MusicBrainz (respecting rate limit)…")
+
+        worker = SearchWorker(client, kind, artist, title, self)
+        self._worker = worker
+        worker.succeeded.connect(self._on_search_results)
+        worker.failed.connect(self._on_search_failed)
+        worker.finished.connect(lambda: self.search_button.setEnabled(True))
+        worker.start()
+
+    def _on_search_results(self, candidates: list[dict]) -> None:
+        self._search_candidates = candidates
+        self._clear_layout(self.search_list_layout)
+        if not candidates:
+            self.search_status.setText("No results found.")
+            return
+        self.search_status.setText(f"Found {len(candidates)} candidate(s).")
+        for candidate in candidates:
+            self.search_list_layout.addWidget(
+                self._candidate_row(candidate, candidates, source="search")
+            )
+
+    def _on_search_failed(self, traceback_text: str) -> None:
+        self.search_status.setText("Search failed (see details).")
+        QMessageBox.critical(self, "Search failed", traceback_text[-1200:])
+
+    # ------------------------------------------------------------ candidate rows
+
+    def _candidate_row(
+        self, candidate: dict, candidates: list[dict], source: str
+    ) -> QWidget:
+        frame = QFrame()
+        frame.setFrameShape(QFrame.StyledPanel)
+        layout = QHBoxLayout(frame)
+        layout.setContentsMargins(6, 4, 6, 4)
+        text = (
+            f"<b>{candidate.get('name', '')}</b> — {candidate.get('artist', '')} "
+            f"<span style='color:gray'>(score {candidate.get('score', '')})</span><br/>"
+            f"<span style='color:gray'>{candidate.get('mbid', '')}</span>"
+        )
+        label = QLabel(text)
+        label.setTextFormat(Qt.RichText)
+        label.setWordWrap(True)
+        layout.addWidget(label, 1)
+
+        open_btn = QPushButton("Open")
+        open_btn.setToolTip("Open on musicbrainz.org")
+        open_btn.clicked.connect(lambda _=False, c=candidate: self._open_candidate(c))
+        layout.addWidget(open_btn)
+
+        apply_btn = QPushButton("Apply")
+        apply_btn.clicked.connect(
+            lambda _=False, c=candidate, cs=candidates: self._apply_candidate(c, cs)
+        )
+        layout.addWidget(apply_btn)
+        return frame
+
+    def _open_candidate(self, candidate: dict) -> None:
+        url = candidate.get("url", "")
+        if url:
+            QDesktopServices.openUrl(QUrl(url))
+
+    def _apply_candidate(self, candidate: dict, candidates: list[dict]) -> None:
+        if self._current_row is None:
+            return
         mbid = candidate.get("mbid", "")
         if not mbid:
             QMessageBox.warning(self, "No MBID", "Selected candidate has no MBID.")
             return
-        affected = self.db.apply_mbid(
-            row["kind"], row["key"], mbid, "manual", self._candidates
-        )
+        row = self._current_row
+        affected = self.db.apply_mbid(row["kind"], row["key"], mbid, "manual", candidates)
         self.applied_count += 1
         self.status.setText(
             f"Applied {mbid} to {affected:,} scrobble(s). "
@@ -394,10 +595,20 @@ class UnresolvedCandidatesDialog(QDialog):
         )
         self.reload()
 
-    def _open_link(self, item: QListWidgetItem) -> None:
-        url = item.data(Qt.UserRole).get("url", "")
-        if url:
-            QDesktopServices.openUrl(QUrl(url))
+    # ------------------------------------------------------------------ helpers
+
+    @staticmethod
+    def _clear_layout(layout: QVBoxLayout) -> None:
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+    def closeEvent(self, event) -> None:
+        if self._worker and self._worker.isRunning():
+            self._worker.wait(5000)
+        super().closeEvent(event)
 
 
 
@@ -797,7 +1008,7 @@ class MainWindow(QMainWindow):
                 "Stop or wait for the current operation before reviewing unresolved candidates.",
             )
             return
-        dialog = UnresolvedCandidatesDialog(self.db, self)
+        dialog = UnresolvedCandidatesDialog(self.db, self.settings, self)
         dialog.exec()
         self.refresh_stats()
         self.model.reload()
