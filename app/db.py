@@ -352,6 +352,7 @@ class Database:
             "lookups": lookups,
             "pending": sum(v for (k, s), v in lookups.items() if s == "pending"),
             "not_found": sum(v for (k, s), v in lookups.items() if s == "not_found"),
+            "discarded": sum(v for (k, s), v in lookups.items() if s == "discarded"),
             "errors": sum(v for (k, s), v in lookups.items() if s == "error"),
             "found": sum(v for (k, s), v in lookups.items() if s == "found"),
         }
@@ -557,20 +558,48 @@ class Database:
                 ).fetchone()
         return int(row["n"] if row else 0)
 
-    def unresolved_lookups(self, kind: str | None = None) -> list[sqlite3.Row]:
-        """Return lookups that were queried but not auto-matched (status='not_found')."""
-        query = """
-            SELECT kind, key, label_artist, label_title, affected_count, candidates_json
+    def unresolved_lookups(
+        self, kind: str | None = None, include_discarded: bool = False
+    ) -> list[sqlite3.Row]:
+        """Return lookups that were queried but not auto-matched.
+
+        Discarded rows are excluded by default; they are kept with their saved
+        candidates so the review dialog can show and restore them on request.
+        """
+        statuses = "'not_found', 'discarded'" if include_discarded else "'not_found'"
+        query = f"""
+            SELECT kind, key, label_artist, label_title, affected_count,
+                   candidates_json, status
             FROM lookup
-            WHERE status = 'not_found'
+            WHERE status IN ({statuses})
         """
         params: list[Any] = []
         if kind in ("track", "artist", "album"):
             query += " AND kind = ?"
             params.append(kind)
-        query += " ORDER BY affected_count DESC, label_artist, label_title"
+        query += " ORDER BY (status = 'discarded'), affected_count DESC, label_artist, label_title"
         with self.connect() as con:
             return con.execute(query, params).fetchall()
+
+    def discard_lookup(self, kind: str, key: str) -> int:
+        """Mark a no-match lookup as reviewed/discarded (keeps its candidates)."""
+        with self.connect() as con:
+            cur = con.execute(
+                "UPDATE lookup SET status='discarded' "
+                "WHERE kind=? AND key=? AND status='not_found'",
+                (kind, key),
+            )
+            return cur.rowcount
+
+    def restore_lookup(self, kind: str, key: str) -> int:
+        """Put a discarded lookup back into the unresolved list."""
+        with self.connect() as con:
+            cur = con.execute(
+                "UPDATE lookup SET status='not_found' "
+                "WHERE kind=? AND key=? AND status='discarded'",
+                (kind, key),
+            )
+            return cur.rowcount
 
     def apply_mbid(
         self,

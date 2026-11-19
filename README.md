@@ -60,7 +60,10 @@ python main.py
    search, or run a **live MusicBrainz search** with custom artist/title and
    apply the chosen result. Use **Review unresolved** in the toolbar to browse
    all lookups that had no exact match and apply saved candidates in one place.
-   A manual edit is applied to every identical scrobble.
+   If none of the candidates match, select the lookup and click **Discard — no
+   matching candidate**: it leaves the unresolved list and will not be queried
+   again. Check **Show discarded** to find it again and use **Restore to
+   unresolved**. A manual edit is applied to every identical scrobble.
 5. **Export JSON…** — opens *Advanced export*, where checkboxes let you require
    track, artist and/or album MBIDs. Only scrobbles with **all** checked fields
    are written (leave all unchecked for the full dataset); a live count previews

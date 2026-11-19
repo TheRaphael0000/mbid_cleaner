@@ -268,6 +268,7 @@ class UnresolvedCandidatesDialog(QDialog):
         self._search_candidates: list[dict] = []
         self._worker: SearchWorker | None = None
         self.applied_count = 0
+        self.discarded_count = 0
 
         self.setWindowTitle("Review unresolved candidates")
         self.resize(1200, 760)
@@ -279,9 +280,18 @@ class UnresolvedCandidatesDialog(QDialog):
         self.kind_filter.addItem("Album", "album")
         self.kind_filter.currentIndexChanged.connect(self.reload)
 
-        self.hide_zero = QCheckBox("Hide 0-candidate entries")
+        self.hide_zero = QCheckBox("Hide entries with no usable candidates")
+        self.hide_zero.setToolTip(
+            "Hide lookups with no saved candidates, or whose candidates all lack an MBID"
+        )
         self.hide_zero.setChecked(True)
         self.hide_zero.stateChanged.connect(self.reload)
+
+        self.show_discarded = QCheckBox("Show discarded")
+        self.show_discarded.setToolTip(
+            "Include lookups previously marked as 'no match'; select one to restore it"
+        )
+        self.show_discarded.stateChanged.connect(self.reload)
 
         self.status = QLabel("")
         self.status.setStyleSheet("color: gray;")
@@ -298,6 +308,7 @@ class UnresolvedCandidatesDialog(QDialog):
         header.addWidget(QLabel("Kind:"))
         header.addWidget(self.kind_filter)
         header.addWidget(self.hide_zero)
+        header.addWidget(self.show_discarded)
         header.addStretch(1)
         header.addWidget(self.refresh_button)
 
@@ -358,9 +369,21 @@ class UnresolvedCandidatesDialog(QDialog):
         self.right_stack.addWidget(self.saved_page)   # 0
         self.right_stack.addWidget(self.manual_page)  # 1
 
+        self.discard_button = QPushButton("Discard — no matching candidate")
+        self.discard_button.setToolTip(
+            "Mark this lookup as reviewed with no match: hide it from unresolved "
+            "and stop re-querying it. Use 'Show discarded' to restore it."
+        )
+        self.discard_button.setEnabled(False)
+        self.discard_button.clicked.connect(self.on_discard_current)
+
         right = QVBoxLayout()
         right.addWidget(self.right_title)
         right.addWidget(self.right_stack, 1)
+        review_row = QHBoxLayout()
+        review_row.addStretch(1)
+        review_row.addWidget(self.discard_button)
+        right.addLayout(review_row)
 
         lists = QHBoxLayout()
         lists.addLayout(left, 2)
@@ -385,7 +408,9 @@ class UnresolvedCandidatesDialog(QDialog):
             current_key = (self._current_row["kind"], self._current_row["key"])
 
         kind = self.kind_filter.currentData()
-        self._all_lookups = self.db.unresolved_lookups(kind)
+        self._all_lookups = self.db.unresolved_lookups(
+            kind, include_discarded=self.show_discarded.isChecked()
+        )
         self.lookup_list.clear()
 
         select_row = -1
@@ -395,12 +420,17 @@ class UnresolvedCandidatesDialog(QDialog):
             except Exception:
                 candidates = []
             count = len(candidates)
-            if self.hide_zero.isChecked() and count == 0:
+            usable = len(self._usable_candidates(candidates))
+            if self.hide_zero.isChecked() and usable == 0:
                 continue
             label = self._lookup_label(row)
+            kind_label = row["kind"] + (" — discarded" if row["status"] == "discarded" else "")
+            candidate_note = f"{count} candidate(s)"
+            if usable != count:
+                candidate_note += f", {usable} with MBID"
             item = QListWidgetItem(
-                f"[{row['kind']}] {label}\n"
-                f"affects {row['affected_count']:,} scrobble(s), {count} candidate(s)"
+                f"[{kind_label}] {label}\n"
+                f"affects {row['affected_count']:,} scrobble(s), {candidate_note}"
             )
             item.setData(Qt.UserRole, (row, candidates))
             self.lookup_list.addItem(item)
@@ -409,16 +439,23 @@ class UnresolvedCandidatesDialog(QDialog):
 
         visible = self.lookup_list.count()
         total = len(self._all_lookups)
+        discarded = sum(1 for row in self._all_lookups if row["status"] == "discarded")
         if total == 0:
-            self.status.setText("No unresolved lookups.")
+            self.status.setText(
+                "No unresolved lookups."
+                if not self.show_discarded.isChecked()
+                else "No unresolved or discarded lookups."
+            )
         elif visible == 0:
             self.status.setText(
-                f"0 shown ({total:,} hidden by filter; uncheck 'Hide 0-candidate entries' to see them)."
+                f"0 shown ({total:,} hidden by filter; uncheck 'Hide entries with no usable candidates' to see them)."
             )
         else:
             hidden = total - visible
             extra = f", {hidden:,} hidden" if hidden else ""
-            self.status.setText(f"{visible:,} unresolved lookup(s) shown{extra}.")
+            if discarded:
+                extra += f", {discarded:,} discarded"
+            self.status.setText(f"{visible:,} lookup(s) shown{extra}.")
 
         if visible > 0:
             self.lookup_list.setCurrentRow(select_row if select_row >= 0 else 0)
@@ -438,6 +475,8 @@ class UnresolvedCandidatesDialog(QDialog):
         self._current_saved = []
         self._search_candidates = []
         self.right_title.setText("Select a lookup")
+        self.discard_button.setEnabled(False)
+        self.discard_button.setText("Discard — no matching candidate")
         self._clear_layout(self.saved_list_layout)
         self._clear_layout(self.search_list_layout)
         self.right_stack.setCurrentIndex(0)
@@ -451,25 +490,67 @@ class UnresolvedCandidatesDialog(QDialog):
             self._show_none_selected()
             return
         row, candidates = item.data(Qt.UserRole)
+        usable = self._usable_candidates(candidates)
         self._current_row = row
-        self._current_saved = candidates
+        self._current_saved = usable
         self._search_candidates = []
         self._clear_layout(self.saved_list_layout)
         self._clear_layout(self.search_list_layout)
 
         label = self._lookup_label(row)
-        if candidates:
-            self.right_title.setText(
-                f"[{row['kind']}] {label} — {len(candidates)} saved candidate(s)"
-            )
-            self._populate_saved(candidates)
+        is_discarded = row["status"] == "discarded"
+        self.discard_button.setEnabled(True)
+        self.discard_button.setText(
+            "Restore to unresolved" if is_discarded else "Discard — no matching candidate"
+        )
+        state = "discarded" if is_discarded else row["kind"]
+        if usable:
+            note = f"{len(usable)} usable candidate(s)"
+            if len(usable) != len(candidates):
+                note += f" ({len(candidates) - len(usable)} without MBID hidden)"
+            self.right_title.setText(f"[{state}] {label} — {note}")
+            self._populate_saved(usable)
             self.right_stack.setCurrentIndex(0)
         else:
             self.right_title.setText(
-                f"[{row['kind']}] {label} — no saved candidates (manual MusicBrainz search)"
+                f"[{state}] {label} — no usable saved candidates "
+                "(manual MusicBrainz search)"
             )
             self._prefill_manual(row)
             self.right_stack.setCurrentIndex(1)
+
+    def on_discard_current(self) -> None:
+        """Discard the selected no-match lookup, or restore a discarded one."""
+        row = self._current_row
+        if row is None:
+            return
+        label = self._lookup_label(row)
+        if row["status"] == "discarded":
+            restored = self.db.restore_lookup(row["kind"], row["key"])
+            self.reload()
+            if restored:
+                self.status.setText(f"Restored '{label}' to the unresolved list.")
+            return
+
+        answer = QMessageBox.question(
+            self,
+            "Discard lookup",
+            f"Discard '{label}'?\n\n"
+            "It will be removed from the unresolved list and will not be queried "
+            "again. Enable 'Show discarded' to restore it later.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        discarded = self.db.discard_lookup(row["kind"], row["key"])
+        self.reload()
+        if discarded:
+            self.discarded_count += 1
+            self.status.setText(
+                f"Discarded '{label}' — no longer unresolved or retried "
+                f"({self.discarded_count} discarded this session)."
+            )
 
     # --------------------------------------------------------------- saved page
 
@@ -574,6 +655,10 @@ class UnresolvedCandidatesDialog(QDialog):
         layout.addWidget(open_btn)
 
         apply_btn = QPushButton("Apply")
+        has_mbid = bool(str(candidate.get("mbid") or "").strip())
+        apply_btn.setEnabled(has_mbid)
+        if not has_mbid:
+            apply_btn.setToolTip("Candidate has no MBID; search manually to find one")
         apply_btn.clicked.connect(
             lambda _=False, c=candidate, cs=candidates: self._apply_candidate(c, cs)
         )
@@ -602,6 +687,15 @@ class UnresolvedCandidatesDialog(QDialog):
         self.reload()
 
     # ------------------------------------------------------------------ helpers
+
+    @staticmethod
+    def _usable_candidates(candidates: list[dict]) -> list[dict]:
+        """Candidates that can actually be applied (i.e. have an MBID)."""
+        usable = []
+        for candidate in candidates or []:
+            if isinstance(candidate, dict) and str(candidate.get("mbid") or "").strip():
+                usable.append(candidate)
+        return usable
 
     @staticmethod
     def _clear_layout(layout: QVBoxLayout) -> None:
@@ -934,9 +1028,12 @@ class MainWindow(QMainWindow):
             f"album <b>{stats['miss_album']:,}</b>"
         )
         kinds_label = ", ".join(kinds) if kinds else "none"
+        discarded = (
+            f" · discarded <b>{stats['discarded']:,}</b>" if stats["discarded"] else ""
+        )
         self.lbl_queue.setText(
             f"Queue [{kinds_label}] <b>{stats['pending']:,}</b> · "
-            f"unresolved <b>{stats['not_found']:,}</b> · "
+            f"unresolved <b>{stats['not_found']:,}</b>{discarded} · "
             f"errors <b>{stats['errors']:,}</b> · cached <b>{stats['found']:,}</b>"
         )
         self.lbl_eta.setText("ETA " + _duration(stats["pending"] * self.settings.rate_limit))
@@ -1144,6 +1241,10 @@ class MainWindow(QMainWindow):
         if dialog.applied_count:
             self.log(
                 f"Applied {dialog.applied_count} candidate(s) from unresolved review."
+            )
+        if dialog.discarded_count:
+            self.log(
+                f"Discarded {dialog.discarded_count} unresolved lookup(s) as no match."
             )
 
     # ---------------------------------------------------------------------- export
