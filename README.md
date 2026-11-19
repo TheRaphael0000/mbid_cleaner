@@ -24,18 +24,24 @@ python main.py
    existing dataset. MBIDs already present in the export are used to seed the
    lookup cache, so identical scrobbles never need an API call.
 2. **Settings** — optionally set a contact email (MusicBrainz requires clients to
-   identify themselves), the request interval (min. 1.05 s by default), and
-   whether album lookups use `release` (default, matches Last.fm) or
-   `release-group`.
-3. **Start resolving** — the worker queries MusicBrainz for each *unique*
-   missing key (artist name, artist+track, artist+album), once ever, cached in
-   SQLite. Only exact normalized name + credited-artist matches are applied
-   automatically. Progress is committed per lookup, so **Stop** / a crash /
-   a restart can always resume. Pause and ETA are shown in the toolbar/stats.
+   identify themselves), the request interval (min. 1.05 s by default), which
+   kinds to resolve (**Tracks / Artists / Albums**), and whether album lookups
+   use `release` (default, matches Last.fm) or `release-group`. You can also
+   enable a **Navidrome (Subsonic API)** instance to be queried first for MBIDs.
+3. **Start resolving** — the worker resolves each *unique* missing key (artist
+   name, artist+track, artist+album), once ever, cached in SQLite. If Navidrome
+   is enabled it is tried first; on an exact match the MBID is applied with
+   source `navidrome`, otherwise the lookup falls back to MusicBrainz. Only
+   exact normalized name + credited-artist matches are applied automatically.
+   Progress is committed per lookup, so **Stop** / a crash / a restart can
+   always resume. Per-query status is shown in the log; pause and ETA are shown
+   in the toolbar/stats.
 4. **Edit** — filter the table ("Missing only", text search), right-click a row
    to set an MBID manually, pick one of the candidates saved from a previous
    search, or run a **live MusicBrainz search** with custom artist/title and
-   apply the chosen result. A manual edit is applied to every identical scrobble.
+   apply the chosen result. Use **Review unresolved** in the toolbar to browse
+   all lookups that had no exact match and apply saved candidates in one place.
+   A manual edit is applied to every identical scrobble.
 5. **Export JSON** — writes a new file with the original page structure and all
    fields preserved, with MBIDs filled. The result is validated against the
    expected schema before the app reports success.

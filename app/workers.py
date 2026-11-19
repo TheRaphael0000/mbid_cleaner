@@ -10,6 +10,7 @@ from PySide6.QtCore import QThread, Signal
 
 from .db import Database
 from .mb import MBClient
+from .navidrome import NavidromeClient
 from .resolver import Resolver
 
 
@@ -37,10 +38,19 @@ class ResolveWorker(QThread):
     succeeded = Signal(int)
     failed = Signal(str)
 
-    def __init__(self, db: Database, client: MBClient, parent=None) -> None:
+    def __init__(
+        self,
+        db: Database,
+        client: MBClient,
+        navidrome: NavidromeClient | None = None,
+        kinds: list[str] | None = None,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self.db = db
         self.client = client
+        self.navidrome = navidrome
+        self.kinds = kinds
         self._stop = threading.Event()
         self._pause = threading.Event()
 
@@ -63,6 +73,8 @@ class ResolveWorker(QThread):
             resolver = Resolver(
                 self.db,
                 self.client,
+                navidrome=self.navidrome,
+                kinds=self.kinds,
                 progress=self.progress.emit,
                 log=self.log.emit,
                 should_stop=self._stop.is_set,

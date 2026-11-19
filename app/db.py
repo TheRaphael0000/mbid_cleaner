@@ -313,7 +313,9 @@ class Database:
 
     # ------------------------------------------------------------------- stats
 
-    def stats(self, dataset_id: int) -> dict[str, Any]:
+    def stats(self, dataset_id: int, kinds: list[str] | None = None) -> dict[str, Any]:
+        if kinds is not None:
+            kinds = [k for k in kinds if k in ("track", "artist", "album")]
         with self.connect() as con:
             row = con.execute(
                 """
@@ -327,9 +329,19 @@ class Database:
                 """,
                 (dataset_id,),
             ).fetchone()
-            lookup_rows = con.execute(
-                "SELECT kind, status, COUNT(*) AS n FROM lookup GROUP BY kind, status"
-            ).fetchall()
+            if kinds:
+                placeholders = ",".join("?" for _ in kinds)
+                lookup_rows = con.execute(
+                    f"SELECT kind, status, COUNT(*) AS n FROM lookup "
+                    f"WHERE kind IN ({placeholders}) GROUP BY kind, status",
+                    kinds,
+                ).fetchall()
+            elif kinds == []:
+                lookup_rows = []
+            else:
+                lookup_rows = con.execute(
+                    "SELECT kind, status, COUNT(*) AS n FROM lookup GROUP BY kind, status"
+                ).fetchall()
         lookups = {(r["kind"], r["status"]): r["n"] for r in lookup_rows}
         return {
             "total": row["total"],
@@ -412,20 +424,43 @@ class Database:
                 "SELECT * FROM lookup WHERE kind = ? AND key = ?", (kind, key)
             ).fetchone()
 
-    def pending_lookups(self, limit: int = 200) -> list[sqlite3.Row]:
+    def pending_lookups(self, limit: int = 200, kinds: list[str] | None = None) -> list[sqlite3.Row]:
+        if kinds is not None:
+            kinds = [k for k in kinds if k in ("track", "artist", "album")]
+            if not kinds:
+                return []
         with self.connect() as con:
+            params: list[Any] = []
+            where = "status = 'pending'"
+            if kinds:
+                placeholders = ",".join("?" for _ in kinds)
+                where += f" AND kind IN ({placeholders})"
+                params.extend(kinds)
+            params.append(limit)
             return con.execute(
-                """
+                f"""
                 SELECT id, kind, key, label_artist, label_title, affected_count, attempts
-                FROM lookup WHERE status = 'pending'
+                FROM lookup WHERE {where}
                 ORDER BY affected_count DESC, id ASC LIMIT ?
                 """,
-                (limit,),
+                params,
             ).fetchall()
 
-    def reset_stale(self) -> None:
+    def reset_stale(self, kinds: list[str] | None = None) -> None:
+        if kinds is not None:
+            kinds = [k for k in kinds if k in ("track", "artist", "album")]
+            if not kinds:
+                return
         with self.connect() as con:
-            con.execute("UPDATE lookup SET status = 'pending' WHERE status = 'querying'")
+            if kinds:
+                placeholders = ",".join("?" for _ in kinds)
+                con.execute(
+                    f"UPDATE lookup SET status = 'pending' "
+                    f"WHERE status = 'querying' AND kind IN ({placeholders})",
+                    kinds,
+                )
+            else:
+                con.execute("UPDATE lookup SET status = 'pending' WHERE status = 'querying'")
 
     def reset_errors(self) -> None:
         with self.connect() as con:
@@ -440,12 +475,39 @@ class Database:
                 "UPDATE lookup SET status='pending', attempts=0 WHERE status='not_found'"
             )
 
-    def pending_count(self) -> int:
+    def pending_count(self, kinds: list[str] | None = None) -> int:
+        if kinds is not None:
+            kinds = [k for k in kinds if k in ("track", "artist", "album")]
+            if not kinds:
+                return 0
         with self.connect() as con:
-            row = con.execute(
-                "SELECT COUNT(*) AS n FROM lookup WHERE status = 'pending'"
-            ).fetchone()
+            if kinds:
+                placeholders = ",".join("?" for _ in kinds)
+                row = con.execute(
+                    f"SELECT COUNT(*) AS n FROM lookup WHERE status = 'pending' "
+                    f"AND kind IN ({placeholders})",
+                    kinds,
+                ).fetchone()
+            else:
+                row = con.execute(
+                    "SELECT COUNT(*) AS n FROM lookup WHERE status = 'pending'"
+                ).fetchone()
         return int(row["n"] if row else 0)
+
+    def unresolved_lookups(self, kind: str | None = None) -> list[sqlite3.Row]:
+        """Return lookups that were queried but not auto-matched (status='not_found')."""
+        query = """
+            SELECT kind, key, label_artist, label_title, affected_count, candidates_json
+            FROM lookup
+            WHERE status = 'not_found'
+        """
+        params: list[Any] = []
+        if kind in ("track", "artist", "album"):
+            query += " AND kind = ?"
+            params.append(kind)
+        query += " ORDER BY affected_count DESC, label_artist, label_title"
+        with self.connect() as con:
+            return con.execute(query, params).fetchall()
 
     def apply_mbid(
         self,

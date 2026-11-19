@@ -68,3 +68,73 @@ class AppSettings:
     @last_dir.setter
     def last_dir(self, value: str) -> None:
         self._q.setValue("paths/last_dir", value)
+
+    @property
+    def navidrome_enabled(self) -> bool:
+        value = self._q.value("navidrome/enabled", False)
+        return str(value).lower() in ("1", "true", "yes") or value is True
+
+    @navidrome_enabled.setter
+    def navidrome_enabled(self, value: bool) -> None:
+        self._q.setValue("navidrome/enabled", bool(value))
+
+    @property
+    def navidrome_url(self) -> str:
+        return str(self._q.value("navidrome/url", "", type=str)).strip()
+
+    @navidrome_url.setter
+    def navidrome_url(self, value: str) -> None:
+        self._q.setValue("navidrome/url", value.strip())
+
+    @property
+    def navidrome_user(self) -> str:
+        return str(self._q.value("navidrome/user", "", type=str)).strip()
+
+    @navidrome_user.setter
+    def navidrome_user(self, value: str) -> None:
+        self._q.setValue("navidrome/user", value.strip())
+
+    @property
+    def navidrome_password(self) -> str:
+        return str(self._q.value("navidrome/password", "", type=str))
+
+    @navidrome_password.setter
+    def navidrome_password(self, value: str) -> None:
+        self._q.setValue("navidrome/password", value)
+
+    @property
+    def resolve_tracks(self) -> bool:
+        value = self._q.value("resolve/tracks", True)
+        return str(value).lower() in ("1", "true", "yes") or value is True
+
+    @resolve_tracks.setter
+    def resolve_tracks(self, value: bool) -> None:
+        self._q.setValue("resolve/tracks", bool(value))
+
+    @property
+    def resolve_artists(self) -> bool:
+        value = self._q.value("resolve/artists", True)
+        return str(value).lower() in ("1", "true", "yes") or value is True
+
+    @resolve_artists.setter
+    def resolve_artists(self, value: bool) -> None:
+        self._q.setValue("resolve/artists", bool(value))
+
+    @property
+    def resolve_albums(self) -> bool:
+        value = self._q.value("resolve/albums", True)
+        return str(value).lower() in ("1", "true", "yes") or value is True
+
+    @resolve_albums.setter
+    def resolve_albums(self, value: bool) -> None:
+        self._q.setValue("resolve/albums", bool(value))
+
+    def enabled_kinds(self) -> list[str]:
+        kinds: list[str] = []
+        if self.resolve_tracks:
+            kinds.append("track")
+        if self.resolve_artists:
+            kinds.append("artist")
+        if self.resolve_albums:
+            kinds.append("album")
+        return kinds

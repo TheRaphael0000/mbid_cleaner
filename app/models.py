@@ -160,6 +160,8 @@ def _state(row: Any) -> str:
         text = "Complete"
     if "manual" in sources:
         text += " · manual"
+    elif "navidrome" in sources:
+        text += " · Navidrome"
     elif "musicbrainz" in sources:
         text += " · MB"
     return text

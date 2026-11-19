@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 from .db import Database
 from .mb import MBClient, MBError, match_exact
+from .navidrome import NavidromeClient, NavidromeError, try_navidrome_match
 from .util import normalize
 
 
@@ -15,6 +16,8 @@ class Resolver:
         self,
         db: Database,
         client: MBClient,
+        navidrome: NavidromeClient | None = None,
+        kinds: list[str] | None = None,
         progress: Callable[[int, int, str], None] | None = None,
         log: Callable[[str], None] | None = None,
         should_stop: Callable[[], bool] | None = None,
@@ -22,6 +25,8 @@ class Resolver:
     ) -> None:
         self.db = db
         self.client = client
+        self.navidrome = navidrome
+        self.kinds = kinds
         self.progress = progress
         self.log = log
         self.should_stop = should_stop or (lambda: False)
@@ -38,14 +43,14 @@ class Resolver:
 
     def run(self) -> int:
         """Process pending lookups until the queue is empty or the user stops."""
-        self.db.reset_stale()
-        total = self.db.pending_count()
+        self.db.reset_stale(self.kinds)
+        total = self.db.pending_count(self.kinds)
 
         while not self.should_stop():
             self._wait_while_paused()
             if self.should_stop():
                 break
-            batch = self.db.pending_lookups(200)
+            batch = self.db.pending_lookups(200, self.kinds)
             if not batch:
                 break
 
@@ -83,25 +88,46 @@ class Resolver:
         attempt = int(row["attempts"] or 0) + 1
         self._emit_log(f"Querying [{attempt}] {label}")
 
+        if self.navidrome is not None:
+            try:
+                nd_match, nd_candidates = try_navidrome_match(
+                    self.navidrome, kind, artist, title
+                )
+                if nd_match and nd_match.get("mbid"):
+                    self.db.apply_mbid(
+                        kind, row["key"], nd_match["mbid"], "navidrome", nd_candidates
+                    )
+                    self._emit_log(
+                        f"  -> Navidrome: found (exact): {nd_match['mbid']}"
+                    )
+                    return
+                self._emit_log("  -> Navidrome: no exact match, falling back to MusicBrainz")
+            except NavidromeError as exc:
+                self._emit_log(f"  -> Navidrome error, falling back to MusicBrainz: {exc}")
+            except Exception as exc:
+                self._emit_log(
+                    f"  -> Navidrome error, falling back to MusicBrainz: {exc}"
+                )
+
         try:
             candidates = self.client.search(kind, artist, title)
         except MBError as exc:
             self.db.mark_error(row["id"], str(exc))
             status = "error (max attempts reached)" if attempt >= 5 else "error, will retry"
-            self._emit_log(f"  -> {status}: {exc}")
+            self._emit_log(f"  -> MusicBrainz {status}: {exc}")
             return
         except Exception as exc:  # defensive: never stall the whole queue
             self.db.mark_error(row["id"], f"Unexpected error: {exc}")
             status = "error (max attempts reached)" if attempt >= 5 else "error, will retry"
-            self._emit_log(f"  -> {status}: {exc}")
+            self._emit_log(f"  -> MusicBrainz {status}: {exc}")
             return
 
         match = match_exact(kind, candidates, normalize(artist), normalize(title))
         if match and match.get("mbid"):
             self.db.apply_mbid(kind, row["key"], match["mbid"], "musicbrainz", candidates)
-            self._emit_log(f"  -> found (exact): {match['mbid']}")
+            self._emit_log(f"  -> MusicBrainz: found (exact): {match['mbid']}")
         else:
             self.db.mark_not_found(row["id"], candidates)
             self._emit_log(
-                f"  -> no exact match (saved {min(len(candidates), 8)} candidate(s))"
+                f"  -> MusicBrainz: no exact match (saved {min(len(candidates), 8)} candidate(s))"
             )
