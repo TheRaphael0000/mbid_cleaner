@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import secrets
 import time
 from typing import Any
@@ -10,8 +11,49 @@ from urllib.parse import urljoin
 
 import requests
 
-from .mb import match_exact
 from .util import normalize
+
+# Navidrome-only cleanup rules to improve matching against local library tags.
+# Strip parenthesized/bracketed segments that are typically metadata variants.
+_STRIP_PARENS = re.compile(
+    r"\s*[\(\[][^)\]]*\b(?:remaster(?:ed|ing)?|deluxe|edition|version|mix|edit|"
+    r"live|mono|stereo|bonus|anniversary|expanded|explicit|clean|single|acoustic|"
+    r"demo|instrumental)\b[^)\]]*[\)\]]",
+    re.IGNORECASE,
+)
+# Strip featuring credits (common in scrobble artist/title strings).
+_FEAT = re.compile(
+    r"\s*(?:[\(\[]\s*)?(?:feat\.?|ft\.?|featuring)\s+[^)\]]*(?:[\)\]])?\s*$",
+    re.IGNORECASE,
+)
+_FEAT_INLINE = re.compile(
+    r"\s+(?:feat\.?|ft\.?|featuring)\s+.+$",
+    re.IGNORECASE,
+)
+_WS = re.compile(r"\s+")
+
+
+def clean_for_navidrome(text: str | None) -> str:
+    """Remove common variant markers (e.g. remaster/feat) for Navidrome matching."""
+    if not text:
+        return ""
+    value = str(text)
+    # Apply repeatedly in case multiple groups/markers are present.
+    for _ in range(3):
+        updated = _STRIP_PARENS.sub("", value)
+        updated = _FEAT.sub("", updated)
+        updated = _FEAT_INLINE.sub("", updated)
+        updated = updated.strip(" -–—")
+        updated = _WS.sub(" ", updated).strip()
+        if updated == value:
+            break
+        value = updated
+    return value
+
+
+def _nav_key(text: str | None) -> str:
+    cleaned = clean_for_navidrome(text)
+    return normalize(cleaned) or normalize(text)
 
 
 class NavidromeError(RuntimeError):
@@ -89,15 +131,21 @@ class NavidromeClient:
         return True
 
     def search(self, kind: str, artist: str, title: str = "") -> list[dict[str, Any]]:
-        """Search Navidrome and return candidates in MBClient-compatible shape."""
+        """Search Navidrome and return candidates in MBClient-compatible shape.
+
+        For Navidrome only, query terms are cleaned (remaster/feat/etc removed)
+        to improve hit rate against local library metadata.
+        """
+        q_artist = clean_for_navidrome(artist) or artist
+        q_title = clean_for_navidrome(title) or title
         if kind == "artist":
-            query = artist
+            query = q_artist
             counts = {"artistCount": 25, "albumCount": 0, "songCount": 0}
         elif kind == "album":
-            query = f"{artist} {title}".strip()
+            query = f"{q_artist} {q_title}".strip()
             counts = {"artistCount": 0, "albumCount": 25, "songCount": 0}
         elif kind == "track":
-            query = f"{artist} {title}".strip()
+            query = f"{q_artist} {q_title}".strip()
             counts = {"artistCount": 0, "albumCount": 0, "songCount": 25}
         else:
             raise ValueError(f"Unknown lookup kind: {kind}")
@@ -160,13 +208,40 @@ class NavidromeClient:
         }
 
 
+def _match_navidrome_exact(
+    kind: str,
+    candidates: list[dict[str, Any]],
+    artist: str,
+    title: str,
+) -> dict[str, Any] | None:
+    """Navidrome-only relaxed exact match (cleaned remaster/feat/etc)."""
+    artist_key = _nav_key(artist)
+    title_key = _nav_key(title)
+    for candidate in candidates:
+        name = _nav_key(candidate.get("name", ""))
+        if kind == "artist":
+            if name and name == artist_key and artist_key:
+                return candidate
+            continue
+        if not title_key or name != title_key:
+            continue
+        credits = {_nav_key(n) for n in candidate.get("credit_names", [])}
+        if artist_key and artist_key in credits:
+            return candidate
+    return None
+
+
 def try_navidrome_match(
     client: NavidromeClient,
     kind: str,
     artist: str,
     title: str,
 ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
-    """Return (exact_match_or_none, candidates) from Navidrome."""
+    """Return (exact_match_or_none, candidates) from Navidrome.
+
+    Matching uses Navidrome-only cleanup rules (e.g. strips remaster/feat
+    markers) so common tag variants can still be treated as exact matches.
+    """
     candidates = client.search(kind, artist, title)
-    exact = match_exact(kind, candidates, normalize(artist), normalize(title))
+    exact = _match_navidrome_exact(kind, candidates, artist, title)
     return exact, candidates

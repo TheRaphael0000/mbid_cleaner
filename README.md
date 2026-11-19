@@ -28,6 +28,9 @@ python main.py
    kinds to resolve (**Tracks / Artists / Albums**), and whether album lookups
    use `release` (default, matches Last.fm) or `release-group`. You can also
    enable a **Navidrome (Subsonic API)** instance to be queried first for MBIDs.
+   Navidrome matching uses relaxed, Navidrome-only cleanup (e.g. strips
+   `(Remaster)`/deluxe/version tags and `feat./ft.` credits) for search and
+   comparison, while MusicBrainz matching remains strict.
 3. **Start resolving** — the worker resolves each *unique* missing key (artist
    name, artist+track, artist+album), once ever, cached in SQLite. If Navidrome
    is enabled it is tried first; on an exact match the MBID is applied with
