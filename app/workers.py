@@ -12,6 +12,7 @@ from .db import Database
 from .mb import MBClient
 from .navidrome import NavidromeClient
 from .resolver import Resolver
+from .sources import SOURCE_MUSICBRAINZ
 
 
 class ImportWorker(QThread):
@@ -41,8 +42,9 @@ class ResolveWorker(QThread):
     def __init__(
         self,
         db: Database,
-        client: MBClient,
+        client: MBClient | None,
         navidrome: NavidromeClient | None = None,
+        source: str = SOURCE_MUSICBRAINZ,
         kinds: list[str] | None = None,
         parent=None,
     ) -> None:
@@ -50,6 +52,7 @@ class ResolveWorker(QThread):
         self.db = db
         self.client = client
         self.navidrome = navidrome
+        self.source = source
         self.kinds = kinds
         self._stop = threading.Event()
         self._pause = threading.Event()
@@ -74,6 +77,7 @@ class ResolveWorker(QThread):
                 self.db,
                 self.client,
                 navidrome=self.navidrome,
+                source=self.source,
                 kinds=self.kinds,
                 progress=self.progress.emit,
                 log=self.log.emit,
@@ -91,15 +95,34 @@ class ExportWorker(QThread):
     succeeded = Signal(dict)
     failed = Signal(str)
 
-    def __init__(self, db: Database, path: str, dataset_id: int, parent=None) -> None:
+    def __init__(
+        self,
+        db: Database,
+        path: str,
+        dataset_id: int,
+        require_track: bool = False,
+        require_artist: bool = False,
+        require_album: bool = False,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self.db = db
         self.path = path
         self.dataset_id = dataset_id
+        self.require_track = require_track
+        self.require_artist = require_artist
+        self.require_album = require_album
 
     def run(self) -> None:
         try:
-            result = self.db.export_file(self.path, self.dataset_id, self.progress.emit)
+            result = self.db.export_file(
+                self.path,
+                self.dataset_id,
+                self.progress.emit,
+                require_track=self.require_track,
+                require_artist=self.require_artist,
+                require_album=self.require_album,
+            )
             result["validation"] = Database.validate_export(self.path)
             self.succeeded.emit(result)
         except Exception:

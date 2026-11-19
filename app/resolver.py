@@ -1,4 +1,4 @@
-"""Resolution engine: dedupe → MusicBrainz → apply → persist (resumable)."""
+"""Resolution engine: dedupe → selected source(s) → apply → persist (resumable)."""
 
 from __future__ import annotations
 
@@ -7,7 +7,13 @@ from typing import Any, Callable
 
 from .db import Database
 from .mb import MBClient, MBError, match_exact
-from .navidrome import NavidromeClient, NavidromeError, try_navidrome_match
+from .navidrome import NavidromeClient, try_navidrome_match
+from .sources import (
+    SOURCE_MUSICBRAINZ,
+    SOURCE_NAVIDROME,
+    SOURCE_NAVIDROME_THEN_MUSICBRAINZ,
+    SOURCES,
+)
 from .util import normalize
 
 
@@ -15,8 +21,9 @@ class Resolver:
     def __init__(
         self,
         db: Database,
-        client: MBClient,
+        client: MBClient | None,
         navidrome: NavidromeClient | None = None,
+        source: str = SOURCE_MUSICBRAINZ,
         kinds: list[str] | None = None,
         progress: Callable[[int, int, str], None] | None = None,
         log: Callable[[str], None] | None = None,
@@ -26,6 +33,7 @@ class Resolver:
         self.db = db
         self.client = client
         self.navidrome = navidrome
+        self.source = source if source in SOURCES else SOURCE_MUSICBRAINZ
         self.kinds = kinds
         self.progress = progress
         self.log = log
@@ -88,27 +96,66 @@ class Resolver:
         attempt = int(row["attempts"] or 0) + 1
         self._emit_log(f"Querying [{attempt}] {label}")
 
-        if self.navidrome is not None:
-            try:
-                nd_match, nd_candidates = try_navidrome_match(
-                    self.navidrome, kind, artist, title
-                )
-                if nd_match and nd_match.get("mbid"):
-                    self.db.apply_mbid(
-                        kind, row["key"], nd_match["mbid"], "navidrome", nd_candidates
-                    )
-                    self._emit_log(
-                        f"  -> Navidrome: found (exact): {nd_match['mbid']}"
-                    )
-                    return
-                self._emit_log("  -> Navidrome: no exact match, falling back to MusicBrainz")
-            except NavidromeError as exc:
-                self._emit_log(f"  -> Navidrome error, falling back to MusicBrainz: {exc}")
-            except Exception as exc:
-                self._emit_log(
-                    f"  -> Navidrome error, falling back to MusicBrainz: {exc}"
-                )
+        if self.source != SOURCE_MUSICBRAINZ:
+            fallback = self.source == SOURCE_NAVIDROME_THEN_MUSICBRAINZ
+            if self._try_navidrome(row, kind, artist, title, attempt, fallback):
+                return
+            if self.source == SOURCE_NAVIDROME:
+                return  # handled in _try_navidrome; never query MusicBrainz
 
+        self._query_musicbrainz(row, kind, artist, title, attempt)
+
+    def _try_navidrome(
+        self,
+        row: Any,
+        kind: str,
+        artist: str,
+        title: str,
+        attempt: int,
+        fallback: bool,
+    ) -> bool:
+        """Try Navidrome; return True when the lookup has been fully handled."""
+        if self.navidrome is None:
+            if fallback:
+                return False
+            self.db.mark_error(row["id"], "Navidrome is not configured")
+            self._emit_log("  -> Navidrome: not configured")
+            return True
+        try:
+            match, candidates = try_navidrome_match(self.navidrome, kind, artist, title)
+        except Exception as exc:  # Navidrome errors must not abort the queue
+            if fallback:
+                self._emit_log(f"  -> Navidrome error, falling back to MusicBrainz: {exc}")
+                return False
+            self.db.mark_error(row["id"], f"Navidrome error: {exc}")
+            status = "error (max attempts reached)" if attempt >= 5 else "error, will retry"
+            self._emit_log(f"  -> Navidrome {status}: {exc}")
+            return True
+        if match and match.get("mbid"):
+            self.db.apply_mbid(kind, row["key"], match["mbid"], "navidrome", candidates)
+            self._emit_log(f"  -> Navidrome: found (exact): {match['mbid']}")
+            return True
+        if fallback:
+            self._emit_log("  -> Navidrome: no exact match, falling back to MusicBrainz")
+            return False
+        self.db.mark_not_found(row["id"], candidates)
+        self._emit_log(
+            f"  -> Navidrome: no exact match (saved {min(len(candidates), 8)} candidate(s))"
+        )
+        return True
+
+    def _query_musicbrainz(
+        self,
+        row: Any,
+        kind: str,
+        artist: str,
+        title: str,
+        attempt: int,
+    ) -> None:
+        if self.client is None:
+            self.db.mark_error(row["id"], "MusicBrainz is not configured")
+            self._emit_log("  -> MusicBrainz: not configured")
+            return
         try:
             candidates = self.client.search(kind, artist, title)
         except MBError as exc:

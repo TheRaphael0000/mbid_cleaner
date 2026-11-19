@@ -4,6 +4,12 @@ from __future__ import annotations
 
 from PySide6.QtCore import QSettings
 
+from .sources import (
+    SOURCE_MUSICBRAINZ,
+    SOURCE_NAVIDROME_THEN_MUSICBRAINZ,
+    SOURCES,
+)
+
 _ORG = "MBIDCleaner"
 _APP = "MBIDCleaner"
 
@@ -69,14 +75,50 @@ class AppSettings:
     def last_dir(self, value: str) -> None:
         self._q.setValue("paths/last_dir", value)
 
-    @property
-    def navidrome_enabled(self) -> bool:
-        value = self._q.value("navidrome/enabled", False)
+    def _bool(self, key: str, default: bool = False) -> bool:
+        value = self._q.value(key, default)
         return str(value).lower() in ("1", "true", "yes") or value is True
 
-    @navidrome_enabled.setter
-    def navidrome_enabled(self, value: bool) -> None:
-        self._q.setValue("navidrome/enabled", bool(value))
+    @property
+    def export_require_track(self) -> bool:
+        return self._bool("export/require_track")
+
+    @export_require_track.setter
+    def export_require_track(self, value: bool) -> None:
+        self._q.setValue("export/require_track", bool(value))
+
+    @property
+    def export_require_artist(self) -> bool:
+        return self._bool("export/require_artist")
+
+    @export_require_artist.setter
+    def export_require_artist(self, value: bool) -> None:
+        self._q.setValue("export/require_artist", bool(value))
+
+    @property
+    def export_require_album(self) -> bool:
+        return self._bool("export/require_album")
+
+    @export_require_album.setter
+    def export_require_album(self, value: bool) -> None:
+        self._q.setValue("export/require_album", bool(value))
+
+    @property
+    def resolve_source(self) -> str:
+        value = str(self._q.value("resolve/source", "", type=str)).strip()
+        if value in SOURCES:
+            return value
+        # Migrate the old "prioritize Navidrome" checkbox.
+        legacy = self._q.value("navidrome/enabled", False)
+        if str(legacy).lower() in ("1", "true", "yes") or legacy is True:
+            return SOURCE_NAVIDROME_THEN_MUSICBRAINZ
+        return SOURCE_MUSICBRAINZ
+
+    @resolve_source.setter
+    def resolve_source(self, value: str) -> None:
+        self._q.setValue(
+            "resolve/source", value if value in SOURCES else SOURCE_MUSICBRAINZ
+        )
 
     @property
     def navidrome_url(self) -> str:

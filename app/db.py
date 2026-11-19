@@ -607,27 +607,70 @@ class Database:
 
     # ------------------------------------------------------------------ export
 
+    @staticmethod
+    def _required_mbid_conditions(
+        require_track: bool, require_artist: bool, require_album: bool
+    ) -> list[str]:
+        conditions: list[str] = []
+        if require_track:
+            conditions.append("s.track_mbid <> ''")
+        if require_artist:
+            conditions.append("s.artist_mbid <> ''")
+        if require_album:
+            conditions.append("s.album_mbid <> ''")
+        return conditions
+
+    def count_exportable(
+        self,
+        dataset_id: int,
+        require_track: bool = False,
+        require_artist: bool = False,
+        require_album: bool = False,
+    ) -> int:
+        """Number of scrobbles an export with these options would contain."""
+        conditions = [
+            "s.dataset_id = ?",
+            *self._required_mbid_conditions(require_track, require_artist, require_album),
+        ]
+        sql = f"SELECT COUNT(*) FROM scrobble s WHERE {' AND '.join(conditions)}"
+        with self.connect() as con:
+            return int(con.execute(sql, (dataset_id,)).fetchone()[0])
+
     def export_file(
         self,
         path: str,
         dataset_id: int,
         progress: Callable[[int, int | None, str], None] | None = None,
+        require_track: bool = False,
+        require_artist: bool = False,
+        require_album: bool = False,
     ) -> dict[str, Any]:
-        """Write a JSON file with the exact original schema and filled MBIDs."""
+        """Write a JSON file with the exact original schema and filled MBIDs.
+
+        If any require_* flags are set, only scrobbles having MBIDs for all
+        required kinds are exported.
+        """
         os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
+        conditions = [
+            "s.dataset_id = ?",
+            *self._required_mbid_conditions(require_track, require_artist, require_album),
+        ]
+        params: list[Any] = [dataset_id]
+        where_sql = " AND ".join(conditions)
+
         with self.connect() as con:
             total = con.execute(
-                "SELECT COUNT(*) FROM scrobble WHERE dataset_id=?", (dataset_id,)
+                f"SELECT COUNT(*) FROM scrobble s WHERE {where_sql}", params
             ).fetchone()[0]
             cursor = con.execute(
-                """
+                f"""
                 SELECT p.idx, p.attr_json, s.raw_json, s.track_mbid,
                        s.artist_mbid, s.album_mbid
                 FROM scrobble s JOIN page p ON p.id = s.page_id
-                WHERE s.dataset_id = ?
+                WHERE {where_sql}
                 ORDER BY p.idx, s.pos
                 """,
-                (dataset_id,),
+                params,
             )
 
             written = 0
@@ -673,7 +716,16 @@ class Database:
                     flush()
                 out.write("]")
 
-        return {"path": path, "tracks": written}
+        return {
+            "path": path,
+            "tracks": written,
+            "filtered": bool(require_track or require_artist or require_album),
+            "required": {
+                "track": require_track,
+                "artist": require_artist,
+                "album": require_album,
+            },
+        }
 
     @staticmethod
     def validate_export(path: str) -> dict[str, Any]:

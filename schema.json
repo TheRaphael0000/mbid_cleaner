@@ -1,0 +1,132 @@
+{
+    "$schema": "http://json-schema.org/schema#",
+    "type": "array",
+    "items": {
+        "type": "object",
+        "properties": {
+            "track": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "artist": {
+                            "type": "object",
+                            "properties": {
+                                "mbid": {
+                                    "type": "string"
+                                },
+                                "#text": {
+                                    "type": "string"
+                                }
+                            },
+                            "required": [
+                                "#text",
+                                "mbid"
+                            ]
+                        },
+                        "streamable": {
+                            "type": "string"
+                        },
+                        "image": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "size": {
+                                        "type": "string"
+                                    },
+                                    "#text": {
+                                        "type": "string"
+                                    }
+                                },
+                                "required": [
+                                    "#text",
+                                    "size"
+                                ]
+                            }
+                        },
+                        "mbid": {
+                            "type": "string"
+                        },
+                        "album": {
+                            "type": "object",
+                            "properties": {
+                                "mbid": {
+                                    "type": "string"
+                                },
+                                "#text": {
+                                    "type": "string"
+                                }
+                            },
+                            "required": [
+                                "#text",
+                                "mbid"
+                            ]
+                        },
+                        "name": {
+                            "type": "string"
+                        },
+                        "url": {
+                            "type": "string"
+                        },
+                        "date": {
+                            "type": "object",
+                            "properties": {
+                                "uts": {
+                                    "type": "string"
+                                },
+                                "#text": {
+                                    "type": "string"
+                                }
+                            },
+                            "required": [
+                                "#text",
+                                "uts"
+                            ]
+                        }
+                    },
+                    "required": [
+                        "album",
+                        "artist",
+                        "date",
+                        "image",
+                        "mbid",
+                        "name",
+                        "streamable",
+                        "url"
+                    ]
+                }
+            },
+            "@attr": {
+                "type": "object",
+                "properties": {
+                    "perPage": {
+                        "type": "string"
+                    },
+                    "totalPages": {
+                        "type": "string"
+                    },
+                    "page": {
+                        "type": "string"
+                    },
+                    "user": {
+                        "type": "string"
+                    },
+                    "total": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "page",
+                    "perPage",
+                    "total",
+                    "totalPages",
+                    "user"
+                ]
+            }
+        },
+        "required": [
+            "@attr",
+            "track"
+        ]
+    }

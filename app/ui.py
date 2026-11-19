@@ -44,6 +44,12 @@ from .mb import MBClient
 from .models import HEADERS, ScrobbleModel
 from .navidrome import NavidromeClient
 from .settings import AppSettings
+from .sources import (
+    SOURCE_MUSICBRAINZ,
+    SOURCE_NAVIDROME,
+    SOURCE_NAVIDROME_THEN_MUSICBRAINZ,
+    SOURCE_LABELS,
+)
 from .util import is_uuid
 from .workers import ExportWorker, ImportWorker, ResolveWorker, SearchWorker
 
@@ -612,6 +618,77 @@ class UnresolvedCandidatesDialog(QDialog):
 
 
 
+class ExportOptionsDialog(QDialog):
+    """Advanced export: check which MBIDs a scrobble must have to be included."""
+
+    def __init__(
+        self, db: Database, settings: AppSettings, dataset_id: int, parent=None
+    ) -> None:
+        super().__init__(parent)
+        self.db = db
+        self.settings = settings
+        self.dataset_id = dataset_id
+        self.total = db.count_exportable(dataset_id)
+        self.setWindowTitle("Advanced export")
+        self.setMinimumWidth(480)
+
+        note = QLabel(
+            "Check the MBID fields a scrobble must have to be exported. All "
+            "checked fields must be present on the same scrobble; leave them "
+            "all unchecked to export the whole dataset."
+        )
+        note.setWordWrap(True)
+
+        self.require_track = QCheckBox(_LABELS["track"])
+        self.require_artist = QCheckBox(_LABELS["artist"])
+        self.require_album = QCheckBox(_LABELS["album"])
+        boxes = (self.require_track, self.require_artist, self.require_album)
+        for box, checked in zip(
+            boxes,
+            (
+                settings.export_require_track,
+                settings.export_require_artist,
+                settings.export_require_album,
+            ),
+        ):
+            box.setChecked(checked)
+            box.stateChanged.connect(lambda _state: self._update_preview())
+
+        self.preview = QLabel()
+        self.preview.setStyleSheet("padding: 6px 0;")
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("<b>Only export scrobbles with these MBIDs</b>"))
+        layout.addWidget(note)
+        layout.addSpacing(6)
+        for box in boxes:
+            layout.addWidget(box)
+        layout.addWidget(self.preview)
+        layout.addWidget(buttons)
+        self._update_preview()
+
+    def _update_preview(self) -> None:
+        count = self.db.count_exportable(
+            self.dataset_id,
+            self.require_track.isChecked(),
+            self.require_artist.isChecked(),
+            self.require_album.isChecked(),
+        )
+        pct = (100.0 * count / self.total) if self.total else 0.0
+        self.preview.setText(
+            f"Scrobbles to export: <b>{count:,}</b> of {self.total:,} ({pct:.1f}%)"
+        )
+
+    def save(self) -> None:
+        self.settings.export_require_track = self.require_track.isChecked()
+        self.settings.export_require_artist = self.require_artist.isChecked()
+        self.settings.export_require_album = self.require_album.isChecked()
+
+
 class SettingsDialog(QDialog):
     def __init__(self, settings: AppSettings, parent=None) -> None:
         super().__init__(parent)
@@ -630,10 +707,12 @@ class SettingsDialog(QDialog):
         self.album_entity.addItems(["release", "release-group"])
         self.album_entity.setCurrentText(settings.album_entity)
 
-        self.navidrome_enabled = QCheckBox(
-            "Prioritize Navidrome for MBID lookups (fall back to MusicBrainz if no exact match)"
-        )
-        self.navidrome_enabled.setChecked(settings.navidrome_enabled)
+        self.source_combo = QComboBox()
+        for mode, label in SOURCE_LABELS.items():
+            self.source_combo.addItem(label, mode)
+        current_source = settings.resolve_source
+        self.source_combo.setCurrentIndex(self.source_combo.findData(current_source))
+
         self.navidrome_url = QLineEdit(settings.navidrome_url)
         self.navidrome_url.setPlaceholderText("http://localhost:4533")
         self.navidrome_user = QLineEdit(settings.navidrome_user)
@@ -655,14 +734,16 @@ class SettingsDialog(QDialog):
         kinds_row.addStretch(1)
 
         form = QFormLayout()
+        form.addRow(QLabel("<b>Resolution</b>"))
+        form.addRow("Lookup source:", self.source_combo)
+        form.addRow("Resolve kinds:", kinds_row)
+        form.addRow(QLabel(""))
         form.addRow(QLabel("<b>MusicBrainz</b>"))
         form.addRow("Contact:", self.contact)
         form.addRow("Min. seconds per request:", self.rate)
         form.addRow("Album entity:", self.album_entity)
-        form.addRow("Resolve kinds:", kinds_row)
         form.addRow(QLabel(""))
         form.addRow(QLabel("<b>Navidrome (Subsonic API)</b>"))
-        form.addRow("", self.navidrome_enabled)
         form.addRow("URL:", self.navidrome_url)
         form.addRow("Username:", self.navidrome_user)
         form.addRow("Password:", self.navidrome_password)
@@ -681,7 +762,7 @@ class SettingsDialog(QDialog):
         self.settings.contact = self.contact.text()
         self.settings.rate_limit = self.rate.value()
         self.settings.album_entity = self.album_entity.currentText()
-        self.settings.navidrome_enabled = self.navidrome_enabled.isChecked()
+        self.settings.resolve_source = self.source_combo.currentData()
         self.settings.navidrome_url = self.navidrome_url.text()
         self.settings.navidrome_user = self.navidrome_user.text()
         self.settings.navidrome_password = self.navidrome_password.text()
@@ -723,7 +804,7 @@ class MainWindow(QMainWindow):
         toolbar.setMovable(False)
         self.addToolBar(toolbar)
         self.act_import = toolbar.addAction("Import JSON", self.on_import)
-        self.act_export = toolbar.addAction("Export JSON", self.on_export)
+        self.act_export = toolbar.addAction("Export JSON…", self.on_export)
         toolbar.addSeparator()
         self.act_start = toolbar.addAction("Start resolving", self.on_start_resolve)
         self.act_pause = toolbar.addAction("Pause", self.on_pause)
@@ -908,7 +989,11 @@ class MainWindow(QMainWindow):
         if not self.dataset_id:
             QMessageBox.information(self, "No dataset", "Import a JSON export first.")
             return
-        if not self.settings.contact:
+        source = self.settings.resolve_source
+        uses_mb = source in (SOURCE_MUSICBRAINZ, SOURCE_NAVIDROME_THEN_MUSICBRAINZ)
+        uses_nd = source in (SOURCE_NAVIDROME, SOURCE_NAVIDROME_THEN_MUSICBRAINZ)
+
+        if uses_mb and not self.settings.contact:
             answer = QMessageBox.question(
                 self,
                 "MusicBrainz contact",
@@ -929,25 +1014,61 @@ class MainWindow(QMainWindow):
                 "Enable at least one of Tracks, Artists, or Albums in Settings.",
             )
             return
-        client = MBClient(
-            contact=self.settings.contact,
-            rate_limit=self.settings.rate_limit,
-            album_entity=self.settings.album_entity,
+        client = (
+            MBClient(
+                contact=self.settings.contact,
+                rate_limit=self.settings.rate_limit,
+                album_entity=self.settings.album_entity,
+            )
+            if uses_mb
+            else None
         )
-        navidrome = self._make_navidrome_client()
+        navidrome = self._make_navidrome_client() if uses_nd else None
+        if uses_nd and navidrome is None:
+            if source == SOURCE_NAVIDROME:
+                QMessageBox.warning(
+                    self,
+                    "Navidrome not configured",
+                    "Navidrome is the selected lookup source, but its URL/username "
+                    "are missing or invalid. Configure it in Settings first.",
+                )
+                return
+            QMessageBox.warning(
+                self,
+                "Navidrome not configured",
+                "Navidrome is configured as the first lookup source, but its "
+                "URL/username are missing or invalid. Continuing with MusicBrainz only.",
+            )
+
         self._logged_progress_step = -1
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
         self.progress.setVisible(True)
-        mode = (
-            f"{self.settings.rate_limit:.2f}s/request "
-            f"(album entity: {self.settings.album_entity}, kinds: {', '.join(kinds)})"
-        )
-        if navidrome is not None:
-            mode += f"; Navidrome prioritized ({self.settings.navidrome_url})"
+        kind_note = f"kinds: {', '.join(kinds)}"
+        if source == SOURCE_NAVIDROME:
+            mode = f"Navidrome only ({self.settings.navidrome_url}; {kind_note})"
+        elif source == SOURCE_NAVIDROME_THEN_MUSICBRAINZ and navidrome is None:
+            mode = f"MusicBrainz only (Navidrome unavailable; {kind_note})"
+        elif source == SOURCE_NAVIDROME_THEN_MUSICBRAINZ:
+            mode = (
+                f"Navidrome first, then MusicBrainz ({self.settings.navidrome_url}; "
+                f"{self.settings.rate_limit:.2f}s/MB request; {kind_note})"
+            )
+        else:
+            mode = (
+                f"MusicBrainz only ({self.settings.rate_limit:.2f}s/request, "
+                f"album entity: {self.settings.album_entity}; {kind_note})"
+            )
         self.log(f"Resolving with {mode} …")
 
-        worker = ResolveWorker(self.db, client, navidrome=navidrome, kinds=kinds, parent=self)
+        worker = ResolveWorker(
+            self.db,
+            client,
+            navidrome=navidrome,
+            source=source,
+            kinds=kinds,
+            parent=self,
+        )
         self.worker = worker
         worker.progress.connect(self._on_resolve_progress)
         worker.log.connect(self.log)
@@ -1024,6 +1145,14 @@ class MainWindow(QMainWindow):
             return
         if not self.dataset_id:
             return
+        options = ExportOptionsDialog(self.db, self.settings, self.dataset_id, self)
+        if options.exec() != QDialog.Accepted:
+            return
+        require_track = options.require_track.isChecked()
+        require_artist = options.require_artist.isChecked()
+        require_album = options.require_album.isChecked()
+        options.save()
+
         with self.db.connect() as con:
             row = con.execute(
                 "SELECT file_name FROM dataset WHERE id=?", (self.dataset_id,)
@@ -1041,10 +1170,26 @@ class MainWindow(QMainWindow):
             return
         self.settings.last_dir = os.path.dirname(path)
         self.log(f"Exporting to {path} …")
+        required = {
+            "track": require_track,
+            "artist": require_artist,
+            "album": require_album,
+        }
+        if any(required.values()):
+            labels = ", ".join(label for kind, label in _LABELS.items() if required[kind])
+            self.log(f"Advanced export filter: {labels} must be present")
         self.progress.setRange(0, 0)
         self.progress.setVisible(True)
 
-        worker = ExportWorker(self.db, path, self.dataset_id, self)
+        worker = ExportWorker(
+            self.db,
+            path,
+            self.dataset_id,
+            require_track=require_track,
+            require_artist=require_artist,
+            require_album=require_album,
+            parent=self,
+        )
         self.worker = worker
         worker.progress.connect(self._on_generic_progress)
         worker.succeeded.connect(self._on_export_done)
@@ -1055,9 +1200,12 @@ class MainWindow(QMainWindow):
 
     def _on_export_done(self, result: dict) -> None:
         validation = result.get("validation", {})
+        required = result.get("required", {})
+        required_labels = [label for kind, label in _LABELS.items() if required.get(kind)]
+        filter_note = f" [filter: {', '.join(required_labels)}]" if required_labels else ""
         self.log(
             f"Exported {result['tracks']:,} scrobbles / {validation.get('pages', 0):,} pages "
-            f"to {result['path']} (schema check passed)"
+            f"to {result['path']}{filter_note} (schema check passed)"
         )
         self.statusBar().showMessage("Export complete")
 
@@ -1179,8 +1327,6 @@ class MainWindow(QMainWindow):
             self.log("Settings saved")
 
     def _make_navidrome_client(self) -> NavidromeClient | None:
-        if not self.settings.navidrome_enabled:
-            return None
         url = self.settings.navidrome_url
         user = self.settings.navidrome_user
         password = self.settings.navidrome_password
