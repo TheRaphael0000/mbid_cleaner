@@ -727,6 +727,10 @@ class SettingsDialog(QDialog):
         self.resolve_artists.setChecked(settings.resolve_artists)
         self.resolve_albums = QCheckBox("Albums")
         self.resolve_albums.setChecked(settings.resolve_albums)
+        self.hierarchical = QCheckBox(
+            "Fill related MBIDs from exact matches (track / album / artist)"
+        )
+        self.hierarchical.setChecked(settings.hierarchical)
         kinds_row = QHBoxLayout()
         kinds_row.addWidget(self.resolve_tracks)
         kinds_row.addWidget(self.resolve_artists)
@@ -737,6 +741,7 @@ class SettingsDialog(QDialog):
         form.addRow(QLabel("<b>Resolution</b>"))
         form.addRow("Lookup source:", self.source_combo)
         form.addRow("Resolve kinds:", kinds_row)
+        form.addRow("", self.hierarchical)
         form.addRow(QLabel(""))
         form.addRow(QLabel("<b>MusicBrainz</b>"))
         form.addRow("Contact:", self.contact)
@@ -763,6 +768,7 @@ class SettingsDialog(QDialog):
         self.settings.rate_limit = self.rate.value()
         self.settings.album_entity = self.album_entity.currentText()
         self.settings.resolve_source = self.source_combo.currentData()
+        self.settings.hierarchical = self.hierarchical.isChecked()
         self.settings.navidrome_url = self.navidrome_url.text()
         self.settings.navidrome_user = self.navidrome_user.text()
         self.settings.navidrome_password = self.navidrome_password.text()
@@ -1044,7 +1050,8 @@ class MainWindow(QMainWindow):
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
         self.progress.setVisible(True)
-        kind_note = f"kinds: {', '.join(kinds)}"
+        hierarchy_note = "on" if self.settings.hierarchical else "off"
+        kind_note = f"kinds: {', '.join(kinds)}; hierarchy: {hierarchy_note}"
         if source == SOURCE_NAVIDROME:
             mode = f"Navidrome only ({self.settings.navidrome_url}; {kind_note})"
         elif source == SOURCE_NAVIDROME_THEN_MUSICBRAINZ and navidrome is None:
@@ -1066,6 +1073,7 @@ class MainWindow(QMainWindow):
             client,
             navidrome=navidrome,
             source=source,
+            hierarchical=self.settings.hierarchical,
             kinds=kinds,
             parent=self,
         )

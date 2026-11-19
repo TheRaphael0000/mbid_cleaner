@@ -424,6 +424,57 @@ class Database:
                 "SELECT * FROM lookup WHERE kind = ? AND key = ?", (kind, key)
             ).fetchone()
 
+    def related_keys(self, kind: str, key: str) -> dict[str, list[tuple[str, str]]]:
+        """Other kinds' (name, key) pairs seen on scrobbles sharing this key.
+
+        Used by hierarchical resolution to turn a matched track into its
+        artist/album keys, or a matched album into its artist/track keys.
+        """
+        result: dict[str, list[tuple[str, str]]] = {"artist": [], "album": [], "track": []}
+        col = _FIELDS.get(kind, (None, None, None))[2]
+        if not col:
+            return result
+        with self.connect() as con:
+            rows = con.execute(
+                f"""
+                SELECT DISTINCT artist_name, artist_key, album_name,
+                       album_lookup_key, track_name, track_lookup_key
+                FROM scrobble WHERE {col} = ? LIMIT 500
+                """,
+                (key,),
+            ).fetchall()
+        seen: dict[str, set[str]] = {k: set() for k in result}
+        specs = (
+            ("artist", "artist_name", "artist_key"),
+            ("album", "album_name", "album_lookup_key"),
+            ("track", "track_name", "track_lookup_key"),
+        )
+        for row in rows:
+            for target, name_col, key_col in specs:
+                name, other_key = row[name_col], row[key_col]
+                if name and other_key and other_key not in seen[target]:
+                    seen[target].add(other_key)
+                    result[target].append((str(name), str(other_key)))
+        return result
+
+    def apply_derived_mbid(
+        self,
+        kind: str,
+        key: str,
+        mbid: str,
+        source: str,
+        candidates: list[dict[str, Any]] | None = None,
+    ) -> int:
+        """Apply a derived MBID only when no MBID is stored for this lookup yet.
+
+        This protects MBIDs that came from the source file, a manual edit or an
+        earlier exact match from being overwritten by a hierarchical guess.
+        """
+        row = self.get_lookup(kind, key)
+        if row is None or row["mbid"] or row["status"] == "querying":
+            return 0
+        return self.apply_mbid(kind, key, mbid, source, candidates)
+
     def pending_lookups(self, limit: int = 200, kinds: list[str] | None = None) -> list[sqlite3.Row]:
         if kinds is not None:
             kinds = [k for k in kinds if k in ("track", "artist", "album")]
@@ -474,6 +525,18 @@ class Database:
             con.execute(
                 "UPDATE lookup SET status='pending', attempts=0 WHERE status='not_found'"
             )
+
+    def lookup_is_pending(self, lookup_id: int) -> bool:
+        """Check a batched row is still pending before processing it.
+
+        A lookup can be filled by a hierarchical derivation (or a manual edit)
+        after the batch was read; re-checking avoids overwriting that result.
+        """
+        with self.connect() as con:
+            row = con.execute(
+                "SELECT status FROM lookup WHERE id = ?", (lookup_id,)
+            ).fetchone()
+        return bool(row and row["status"] == "pending")
 
     def pending_count(self, kinds: list[str] | None = None) -> int:
         if kinds is not None:

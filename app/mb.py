@@ -130,6 +130,8 @@ class MBClient:
     def _parse(kind: str, item: dict[str, Any]) -> dict[str, Any]:
         name = item.get("name") or item.get("title") or ""
         credits: list[str] = []
+        artist_names: list[str] = []
+        artist_mbid = ""
         for credit in item.get("artist-credit") or []:
             if not isinstance(credit, dict):
                 continue
@@ -140,6 +142,29 @@ class MBClient:
             artist_name = artist.get("name") or ""
             if artist_name and artist_name != credit_name:
                 credits.append(artist_name)
+            if artist_name and artist_name not in artist_names:
+                artist_names.append(artist_name)
+            if not artist_mbid and artist.get("id"):
+                artist_mbid = str(artist["id"])
+
+        # Recordings carry their releases; releases carry their release group.
+        # Keep them so the resolver can derive album/artist MBIDs without extra
+        # requests for track matches.
+        albums: list[dict[str, str]] = []
+        if kind == "track":
+            for release in item.get("releases") or []:
+                if not isinstance(release, dict) or not release.get("id"):
+                    continue
+                group = release.get("release-group") or {}
+                albums.append(
+                    {
+                        "mbid": str(release["id"]),
+                        "name": str(release.get("title") or ""),
+                        "release_group_mbid": str(group.get("id") or ""),
+                        "release_group_name": str(group.get("title") or ""),
+                    }
+                )
+        group = item.get("release-group") or {}
 
         mbid = item.get("id", "")
         entity = {"artist": "artist", "album": "release", "track": "recording"}[kind]
@@ -148,6 +173,37 @@ class MBClient:
             "name": name,
             "artist": " / ".join(credits[:3]),
             "credit_names": credits,
+            "artist_names": artist_names,
+            "artist_mbid": artist_mbid,
+            "albums": albums,
+            "release_group_mbid": str(group.get("id") or ""),
+            "release_group_name": str(group.get("title") or ""),
             "score": item.get("score", 0),
             "url": f"https://musicbrainz.org/{entity}/{mbid}" if mbid else "",
         }
+
+    def album_recordings(self, album_mbid: str) -> list[dict[str, Any]]:
+        """Fetch recordings of a matched album so track MBIDs can be derived.
+
+        Uses an extra MusicBrainz lookup (still rate-limited). For a
+        release-group, the first release is used as the representative source.
+        """
+        if not album_mbid:
+            return []
+        try:
+            if self.album_entity == "release-group":
+                body = self._get(f"release-group/{album_mbid}", {"fmt": "json", "inc": "releases"})
+                releases = body.get("releases") or []
+                album_mbid = str((releases[0] or {}).get("id") or "") if releases else ""
+                if not album_mbid:
+                    return []
+            body = self._get(f"release/{album_mbid}", {"fmt": "json", "inc": "recordings"})
+        except MBError:
+            return []
+        recordings: list[dict[str, Any]] = []
+        for media in body.get("media") or []:
+            for track in media.get("tracks") or []:
+                recording = track.get("recording") or {}
+                if recording.get("id"):
+                    recordings.append(self._parse("track", recording))
+        return recordings

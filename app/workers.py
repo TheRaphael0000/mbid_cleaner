@@ -45,6 +45,7 @@ class ResolveWorker(QThread):
         client: MBClient | None,
         navidrome: NavidromeClient | None = None,
         source: str = SOURCE_MUSICBRAINZ,
+        hierarchical: bool = True,
         kinds: list[str] | None = None,
         parent=None,
     ) -> None:
@@ -53,6 +54,7 @@ class ResolveWorker(QThread):
         self.client = client
         self.navidrome = navidrome
         self.source = source
+        self.hierarchical = hierarchical
         self.kinds = kinds
         self._stop = threading.Event()
         self._pause = threading.Event()
@@ -78,6 +80,7 @@ class ResolveWorker(QThread):
                 self.client,
                 navidrome=self.navidrome,
                 source=self.source,
+                hierarchical=self.hierarchical,
                 kinds=self.kinds,
                 progress=self.progress.emit,
                 log=self.log.emit,

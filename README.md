@@ -37,6 +37,14 @@ python main.py
    Navidrome-only cleanup (e.g. strips `(Remaster)`/deluxe/version tags and
    `feat./ft.` credits) for search and comparison; MusicBrainz matching remains
    strict. Existing "prioritize Navidrome" settings are migrated automatically.
+
+   **Fill related MBIDs from exact matches** (on by default) enables hierarchical
+   resolution: a track match also fills the artist MBID and the album MBID when
+   the release title matches the scrobbled album; an album match fills the artist
+   MBID and fetches the release's recordings (one extra rate-limited request) to
+   exact-match track names. Navidrome results contribute parent MBIDs only when
+   they are tagged in the Subsonic response. Derived MBIDs never overwrite values
+   from the source file, manual edits or previous exact matches.
 3. **Start resolving** — the worker resolves each *unique* missing key (artist
    name, artist+track, artist+album), once ever, cached in SQLite. With
    **Navidrome only**, no exact match is recorded as unresolved (candidates
@@ -66,6 +74,7 @@ python main.py
 - `app/db.py` — schema, import/export, dedupe and edits.
 - `app/mb.py` — rate-limited MusicBrainz client and exact-match logic.
 - `app/resolver.py` — resumable query engine.
+- `app/hierarchy.py` — hierarchical MBID filling from exact matches.
 - `app/sources.py` — lookup source modes.
 - `app/ui.py` — PySide6 GUI.
 

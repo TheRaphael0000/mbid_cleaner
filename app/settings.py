@@ -121,6 +121,14 @@ class AppSettings:
         )
 
     @property
+    def hierarchical(self) -> bool:
+        return self._bool("resolve/hierarchical", True)
+
+    @hierarchical.setter
+    def hierarchical(self, value: bool) -> None:
+        self._q.setValue("resolve/hierarchical", bool(value))
+
+    @property
     def navidrome_url(self) -> str:
         return str(self._q.value("navidrome/url", "", type=str)).strip()
 

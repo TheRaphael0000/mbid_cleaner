@@ -6,6 +6,7 @@ import time
 from typing import Any, Callable
 
 from .db import Database
+from .hierarchy import HierarchyResolver
 from .mb import MBClient, MBError, match_exact
 from .navidrome import NavidromeClient, try_navidrome_match
 from .sources import (
@@ -24,6 +25,7 @@ class Resolver:
         client: MBClient | None,
         navidrome: NavidromeClient | None = None,
         source: str = SOURCE_MUSICBRAINZ,
+        hierarchical: bool = True,
         kinds: list[str] | None = None,
         progress: Callable[[int, int, str], None] | None = None,
         log: Callable[[str], None] | None = None,
@@ -34,6 +36,9 @@ class Resolver:
         self.client = client
         self.navidrome = navidrome
         self.source = source if source in SOURCES else SOURCE_MUSICBRAINZ
+        self.hierarchy = (
+            HierarchyResolver(db, client, log) if hierarchical else None
+        )
         self.kinds = kinds
         self.progress = progress
         self.log = log
@@ -65,6 +70,8 @@ class Resolver:
             for row in batch:
                 if self.should_stop():
                     break
+                if not self.db.lookup_is_pending(row["id"]):
+                    continue  # filled by a derived MBID or a manual edit meanwhile
                 self._wait_while_paused()
                 if self.should_stop():
                     break
@@ -105,6 +112,14 @@ class Resolver:
 
         self._query_musicbrainz(row, kind, artist, title, attempt)
 
+    def _apply_hierarchy(self, kind: str, row: Any, match: dict, source: str) -> None:
+        if self.hierarchy is None:
+            return
+        try:
+            self.hierarchy.apply(kind, row["key"], match, source, row)
+        except Exception as exc:  # hierarchical fill must never stall resolution
+            self._emit_log(f"  -> Hierarchical fill error: {exc}")
+
     def _try_navidrome(
         self,
         row: Any,
@@ -134,6 +149,7 @@ class Resolver:
         if match and match.get("mbid"):
             self.db.apply_mbid(kind, row["key"], match["mbid"], "navidrome", candidates)
             self._emit_log(f"  -> Navidrome: found (exact): {match['mbid']}")
+            self._apply_hierarchy(kind, row, match, "navidrome")
             return True
         if fallback:
             self._emit_log("  -> Navidrome: no exact match, falling back to MusicBrainz")
@@ -173,6 +189,7 @@ class Resolver:
         if match and match.get("mbid"):
             self.db.apply_mbid(kind, row["key"], match["mbid"], "musicbrainz", candidates)
             self._emit_log(f"  -> MusicBrainz: found (exact): {match['mbid']}")
+            self._apply_hierarchy(kind, row, match, "musicbrainz")
         else:
             self.db.mark_not_found(row["id"], candidates)
             self._emit_log(

@@ -68,6 +68,41 @@ def _first_str(item: dict[str, Any], *keys: str) -> str:
     return ""
 
 
+def _parent_tags(item: dict[str, Any]) -> tuple[str, str, list[str], str]:
+    """Read optional artist/album MBID tags from a Subsonic result.
+
+    Navidrome versions expose these inconsistently; check the common flat and
+    nested spellings and return whatever is present (empty strings otherwise).
+    """
+    artist_mbid = _first_str(
+        item, "artistMusicBrainzId", "artistMusicBrainzID", "artist_mbid"
+    )
+    album_mbid = _first_str(
+        item, "albumMusicBrainzId", "albumMusicBrainzID", "album_mbid"
+    )
+    artist_names: list[str] = []
+    album_name = ""
+    nested_artist = item.get("artist")
+    nested_album = item.get("album")
+    if isinstance(nested_artist, dict):
+        artist_mbid = artist_mbid or _first_str(
+            nested_artist, "musicBrainzId", "musicBrainzID", "mbid"
+        )
+        if nested_artist.get("name"):
+            artist_names.append(str(nested_artist["name"]))
+    if isinstance(nested_album, dict):
+        album_mbid = album_mbid or _first_str(
+            nested_album, "musicBrainzId", "musicBrainzID", "mbid"
+        )
+        album_name = _first_str(nested_album, "name", "title")
+    for value in (item.get("artist"), item.get("albumArtist")):
+        if isinstance(value, str) and value and value not in artist_names:
+            artist_names.append(value)
+    if isinstance(item.get("album"), str):
+        album_name = album_name or str(item["album"])
+    return artist_mbid, album_mbid, artist_names, album_name
+
+
 class NavidromeClient:
     """Minimal Subsonic API client focused on MBID lookup."""
 
@@ -170,6 +205,11 @@ class NavidromeClient:
             "name": name,
             "artist": name,
             "credit_names": [name] if name else [],
+            "artist_names": [name] if name else [],
+            "artist_mbid": mbid,
+            "albums": [],
+            "release_group_mbid": "",
+            "release_group_name": "",
             "score": 100 if mbid else 0,
             "url": "",
             "source": "navidrome",
@@ -181,11 +221,17 @@ class NavidromeClient:
         artist = _first_str(item, "artist")
         mbid = _first_str(item, "musicBrainzId", "musicBrainzID", "mbid")
         credits = [artist] if artist else []
+        artist_mbid, _album_mbid, artist_names, _album_name = _parent_tags(item)
         return {
             "mbid": mbid,
             "name": name,
             "artist": artist,
             "credit_names": credits,
+            "artist_names": artist_names or credits,
+            "artist_mbid": artist_mbid,
+            "albums": [],
+            "release_group_mbid": "",
+            "release_group_name": "",
             "score": 100 if mbid else 0,
             "url": "",
             "source": "navidrome",
@@ -197,11 +243,22 @@ class NavidromeClient:
         artist = _first_str(item, "artist")
         mbid = _first_str(item, "musicBrainzId", "musicBrainzID", "mbid")
         credits = [artist] if artist else []
+        artist_mbid, album_mbid, artist_names, album_name = _parent_tags(item)
         return {
             "mbid": mbid,
             "name": name,
             "artist": artist,
             "credit_names": credits,
+            "artist_names": artist_names or credits,
+            "artist_mbid": artist_mbid,
+            "albums": (
+                [{"mbid": album_mbid, "name": album_name,
+                  "release_group_mbid": "", "release_group_name": ""}]
+                if album_mbid
+                else []
+            ),
+            "release_group_mbid": "",
+            "release_group_name": "",
             "score": 100 if mbid else 0,
             "url": "",
             "source": "navidrome",
